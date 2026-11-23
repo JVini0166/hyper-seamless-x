@@ -829,7 +829,7 @@ fn read_video(
             if metrics {
                 eprintln!("video window={} transport=webrtc", info.handle);
             }
-            let control = monitor_rtc_control(stream);
+            let control = monitor_rtc_control(stream, metrics.then_some(info.handle));
             (
                 Some(crate::h264::Decoder::default()),
                 Some((peer, control)),
@@ -948,12 +948,31 @@ fn read_video(
 // The Windows host sends heartbeat packets on the authenticated control stream.
 fn monitor_rtc_control(
     mut stream: StreamOwned<ClientConnection, Wire>,
+    metrics_window: Option<u64>,
 ) -> async_channel::Receiver<()> {
     let (keepalive, control) = async_channel::bounded(1);
     thread::spawn(move || {
+        let mut encoder = None;
         while !keepalive.is_closed() {
             match protocol::receive_h264_access_unit(&mut stream) {
                 Ok(None) => continue,
+                Ok(Some(packet)) => {
+                    let Some(window) = metrics_window else {
+                        break;
+                    };
+                    if let Some(mode) = protocol::EncoderMode::from_marker(&packet) {
+                        encoder = Some(mode);
+                        continue;
+                    }
+                    if let Some(sample) = protocol::HostFrameMetrics::from_h264_marker(&packet) {
+                        let mode = encoder.map_or("h264-unreported", protocol::EncoderMode::label);
+                        eprintln!(
+                            "video_host window={window} transport=webrtc encoder={mode} readback_us={} encode_us={} host_dropped={}",
+                            sample.capture_micros, sample.encode_micros, sample.dropped,
+                        );
+                        continue;
+                    }
+                }
                 Err(error) if error.is::<protocol::VideoFinished>() => {
                     let _ = keepalive.try_send(());
                 }
@@ -1745,6 +1764,7 @@ mod tests {
                 let Request::View {
                     h264: offered,
                     rtc_offer,
+                    h264_metrics,
                     ..
                 } = hello.request
                 else {
@@ -1755,6 +1775,18 @@ mod tests {
                     let ip = stream.sock.lan_ip().ok_or("no local IP")?;
                     let (mut peer, answer) = protocol::rtc::VideoPeer::answer(ip, &offer)?;
                     protocol::send(&mut stream, &Response::StreamingRtc { answer })?;
+                    if h264_metrics {
+                        protocol::send_h264_access_unit(
+                            &mut stream,
+                            protocol::EncoderMode::MediaFoundation.marker(),
+                        )?;
+                        let sample = protocol::HostFrameMetrics {
+                            capture_micros: 460,
+                            encode_micros: 5600,
+                            dropped: 3,
+                        };
+                        protocol::send_h264_access_unit(&mut stream, &sample.h264_marker())?;
+                    }
                     let deadline = Instant::now() + Duration::from_secs(3);
                     let mut sent = false;
                     loop {

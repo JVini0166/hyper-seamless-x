@@ -471,6 +471,40 @@ impl Capture {
     }
 }
 
+#[derive(Default)]
+struct RtcDiagnostics {
+    frames: u32,
+    capture_micros: u64,
+    encode_micros: u64,
+    dropped: u32,
+    encoder: Option<protocol::EncoderMode>,
+}
+
+impl RtcDiagnostics {
+    fn record(&mut self, mode: protocol::EncoderMode, metrics: protocol::HostFrameMetrics) {
+        self.frames += 1;
+        self.capture_micros += u64::from(metrics.capture_micros);
+        self.encode_micros += u64::from(metrics.encode_micros);
+        self.dropped = self.dropped.saturating_add(metrics.dropped);
+        self.encoder = Some(mode);
+    }
+
+    fn send(&mut self, stream: &mut Stream) -> Result<()> {
+        let Some(encoder) = self.encoder else {
+            return Ok(());
+        };
+        let sample = std::mem::take(self);
+        let frames = u64::from(sample.frames);
+        let metrics = protocol::HostFrameMetrics {
+            capture_micros: (sample.capture_micros / frames) as u32,
+            encode_micros: (sample.encode_micros / frames) as u32,
+            dropped: sample.dropped,
+        };
+        protocol::send_h264_access_unit(stream, encoder.marker())?;
+        protocol::send_h264_access_unit(stream, &metrics.h264_marker())
+    }
+}
+
 fn capture(
     window: Window,
     stream: &mut Stream,
@@ -522,6 +556,7 @@ fn capture(
         let mut last_heartbeat = Instant::now();
         let mut last_keyframe_request = None;
         let mut last_bitrate_change = None;
+        let mut rtc_diagnostics = (h264_metrics && rtc.is_some()).then(RtcDiagnostics::default);
         while !control.is_finished() && !stop.load(Ordering::Acquire) {
             if let Some(peer) = rtc.as_mut() {
                 peer.poll()?;
@@ -550,6 +585,9 @@ fn capture(
                     break;
                 }
                 if last_heartbeat.elapsed() >= Duration::from_secs(2) {
+                    if let Some(diagnostics) = rtc_diagnostics.as_mut() {
+                        diagnostics.send(stream)?;
+                    }
                     protocol::heartbeat(stream)?;
                     last_heartbeat = Instant::now();
                 }
@@ -561,8 +599,16 @@ fn capture(
                 .take();
             if let Some(CapturedPacket::H264(unit, encode_micros)) = frame {
                 let dropped = latest.dropped.swap(0, Ordering::Relaxed);
+                let sample = protocol::HostFrameMetrics {
+                    capture_micros: 0,
+                    encode_micros,
+                    dropped,
+                };
                 if let Some(peer) = rtc.as_mut() {
                     peer.send(unit)?;
+                    if let Some(diagnostics) = rtc_diagnostics.as_mut() {
+                        diagnostics.record(protocol::EncoderMode::NvencGpuCopy, sample);
+                    }
                     continue;
                 }
                 if !announced {
@@ -574,11 +620,7 @@ fn capture(
                     &unit,
                     protocol::EncoderMode::NvencGpuCopy,
                     metrics,
-                    h264_metrics.then_some(protocol::HostFrameMetrics {
-                        capture_micros: 0,
-                        encode_micros,
-                        dropped,
-                    }),
+                    h264_metrics.then_some(sample),
                     &mut last_encoder,
                 )?;
                 last_write = Instant::now();
@@ -596,8 +638,16 @@ fn capture(
                     let encode_micros = protocol::duration_micros(encode_start.elapsed());
                     match encoded {
                         Ok((unit, mode)) => {
+                            let sample = protocol::HostFrameMetrics {
+                                capture_micros,
+                                encode_micros,
+                                dropped,
+                            };
                             if let Some(peer) = rtc.as_mut() {
                                 peer.send(unit)?;
+                                if let Some(diagnostics) = rtc_diagnostics.as_mut() {
+                                    diagnostics.record(mode, sample);
+                                }
                                 continue;
                             }
                             if !announced {
@@ -609,11 +659,7 @@ fn capture(
                                 &unit,
                                 mode,
                                 metrics,
-                                h264_metrics.then_some(protocol::HostFrameMetrics {
-                                    capture_micros,
-                                    encode_micros,
-                                    dropped,
-                                }),
+                                h264_metrics.then_some(sample),
                                 &mut last_encoder,
                             )?;
                             last_write = Instant::now();
