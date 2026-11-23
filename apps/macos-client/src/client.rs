@@ -862,6 +862,15 @@ impl Render for RemoteView {
                     this.click(event.position, protocol::PointerButton::Right, window, cx);
                 }),
             )
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(0x101722))
+            .text_color(rgb(0xe8edf5))
+            .when_some(self.frame.clone(), |view, frame| {
+                view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
+            })
+            .when(self.frame.is_none(), |view| view.child(self.status.clone()))
             .when_some(self.input_error.clone(), |view, error| {
                 view.child(
                     div()
@@ -876,14 +885,5 @@ impl Render for RemoteView {
                         .child(error),
                 )
             })
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x101722))
-            .text_color(rgb(0xe8edf5))
-            .when_some(self.frame.clone(), |view, frame| {
-                view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
-            })
-            .when(self.frame.is_none(), |view| view.child(self.status.clone()))
     }
 }

@@ -14,6 +14,16 @@ fn tls_pairing_authenticates_and_rejects_wrong_token() -> protocol::Result<()> {
         let mut stream = rustls::StreamOwned::new(connection, socket);
         let hello: Hello = protocol::receive(&mut stream)?;
         hello.verify(&host_pairing)?;
+        assert!(matches!(
+            hello.request,
+            Request::Click {
+                handle: 42,
+                process_id: 7,
+                x: 123,
+                y: 456,
+                button: protocol::PointerButton::Right,
+            }
+        ));
         let invalid: Hello = protocol::receive(&mut stream)?;
         assert!(invalid.verify(&host_pairing).is_err());
         protocol::send(&mut stream, &protocol::Response::Launched)
@@ -28,7 +38,13 @@ fn tls_pairing_authenticates_and_rejects_wrong_token() -> protocol::Result<()> {
     let mut hello = Hello {
         version: VERSION,
         token: pairing.token,
-        request: Request::List,
+        request: Request::Click {
+            handle: 42,
+            process_id: 7,
+            x: 123,
+            y: 456,
+            button: protocol::PointerButton::Right,
+        },
     };
     protocol::send(&mut stream, &hello)?;
     hello.token[0] ^= 1;
