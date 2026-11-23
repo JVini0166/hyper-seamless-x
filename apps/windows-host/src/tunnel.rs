@@ -46,13 +46,20 @@ impl Drop for ManagedNgrok {
 }
 
 pub fn ngrok_address() -> Result<String> {
+    let catalog = read_catalog("http://127.0.0.1:4040/api/endpoints")?;
+    select_endpoint(&catalog).ok_or_else(|| {
+        format!("Nenhum endpoint ngrok encaminha para 127.0.0.1:{DEFAULT_PORT}").into()
+    })
+}
+
+fn read_catalog(url: &str) -> Result<Value> {
     let config = ureq::Agent::config_builder()
         .proxy(None)
         .max_redirects(0)
         .timeout_global(Some(Duration::from_secs(2)))
         .build();
     let mut response = ureq::Agent::new_with_config(config)
-        .get("http://127.0.0.1:4040/api/endpoints")
+        .get(url)
         .call()
         .map_err(|_| "Agente ngrok indisponível no endereço local padrão")?;
     if response.status() != 200 {
@@ -63,10 +70,7 @@ pub fn ngrok_address() -> Result<String> {
         .with_config()
         .limit(131_072)
         .read_to_string()?;
-    let catalog: Value = serde_json::from_str(&body)?;
-    select_endpoint(&catalog).ok_or_else(|| {
-        format!("Nenhum endpoint ngrok encaminha para 127.0.0.1:{DEFAULT_PORT}").into()
-    })
+    Ok(serde_json::from_str(&body)?)
 }
 
 fn select_endpoint(catalog: &Value) -> Option<String> {
@@ -87,10 +91,11 @@ fn select_endpoint(catalog: &Value) -> Option<String> {
             }
             let address = endpoint["url"].as_str()?;
             Endpoint::parse(address).ok()?;
-            let priority = if address.starts_with("https://") {
-                0
-            } else {
-                1
+            let priority = match address.split_once("://")?.0 {
+                "https" => 0,
+                "tcp" => 1,
+                "http" => 2,
+                _ => return None,
             };
             Some((priority, address))
         })
@@ -114,5 +119,43 @@ mod tests {
             Some("https://correct.ngrok.app")
         );
         assert!(select_endpoint(&serde_json::json!({"endpoints": []})).is_none());
+    }
+    #[test]
+    fn reads_endpoint_catalog_from_the_agent_http_api() -> Result<()> {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            thread,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}/api/endpoints", listener.local_addr()?);
+        let agent = thread::spawn(move || -> Result<()> {
+            let (mut connection, _) = listener.accept()?;
+            connection.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let mut request = BufReader::new(&connection);
+            let mut line = String::new();
+            request.read_line(&mut line)?;
+            assert_eq!(line.trim_end(), "GET /api/endpoints HTTP/1.1");
+            loop {
+                line.clear();
+                if request.read_line(&mut line)? == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let body = r#"{"endpoints":[{"url":"https://example.ngrok.app","upstream":{"url":"http://127.0.0.1:47651"}}]}"#;
+            write!(
+                connection,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )?;
+            Ok(())
+        });
+        let catalog = read_catalog(&endpoint)?;
+        assert_eq!(
+            select_endpoint(&catalog).as_deref(),
+            Some("https://example.ngrok.app")
+        );
+        agent.join().expect("test agent panicked")?;
+        Ok(())
     }
 }
