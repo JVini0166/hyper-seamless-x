@@ -2,7 +2,7 @@ use protocol::{Frame, Result};
 use std::{ffi::c_void, ptr::NonNull};
 
 unsafe extern "C" {
-    fn hsx_encoder_create(width: u32, height: u32, out: *mut *mut c_void) -> i32;
+    fn hsx_encoder_create(width: u32, height: u32, bitrate: u32, out: *mut *mut c_void) -> i32;
     fn hsx_encoder_destroy(handle: *mut c_void);
     fn hsx_encoder_encode(
         handle: *mut c_void,
@@ -22,7 +22,7 @@ struct MediaFoundationEncoder {
 }
 
 impl MediaFoundationEncoder {
-    pub fn new(width: u32, height: u32) -> Result<Self> {
+    pub fn new(width: u32, height: u32, bitrate: u32) -> Result<Self> {
         if width == 0
             || height == 0
             || width % 2 != 0
@@ -33,7 +33,7 @@ impl MediaFoundationEncoder {
         }
         let mut handle = std::ptr::null_mut();
         // Media Foundation and its COM apartment are owned by the current thread.
-        let status = unsafe { hsx_encoder_create(width, height, &mut handle) };
+        let status = unsafe { hsx_encoder_create(width, height, bitrate, &mut handle) };
         if status < 0 {
             return Err(format!("Media Foundation recusou o encoder H.264 ({status:#x})").into());
         }
@@ -120,24 +120,30 @@ pub struct Encoder {
     height: u32,
     backend: Backend,
     first: bool,
+    bitrate: u32,
 }
 
 impl Encoder {
-    pub fn new(width: u32, height: u32) -> Result<Self> {
-        let backend = match crate::nvenc::Encoder::new(width, height) {
+    pub fn new(width: u32, height: u32, limit: u32) -> Result<Self> {
+        let bitrate = crate::nvenc::target_bitrate(width, height, limit);
+        let backend = match crate::nvenc::Encoder::new(width, height, limit) {
             Ok(nvidia) => Backend::Nvidia(Box::new(nvidia)),
-            Err(_) => Backend::MediaFoundation(MediaFoundationEncoder::new(width, height)?),
+            Err(_) => {
+                Backend::MediaFoundation(MediaFoundationEncoder::new(width, height, bitrate)?)
+            }
         };
         Ok(Self {
             width,
             height,
             backend,
             first: true,
+            bitrate,
         })
     }
 
-    pub fn matches(&self, frame: &Frame) -> bool {
+    pub fn matches(&self, frame: &Frame, limit: u32) -> bool {
         (self.width, self.height) == (frame.width, frame.height)
+            && self.bitrate == crate::nvenc::target_bitrate(frame.width, frame.height, limit)
     }
 
     pub fn mode(&self) -> protocol::EncoderMode {
@@ -156,8 +162,11 @@ impl Encoder {
                     self.first = false;
                     return Ok(unit);
                 }
-                self.backend =
-                    Backend::MediaFoundation(MediaFoundationEncoder::new(self.width, self.height)?);
+                self.backend = Backend::MediaFoundation(MediaFoundationEncoder::new(
+                    self.width,
+                    self.height,
+                    self.bitrate,
+                )?);
             }
             Backend::MediaFoundation(encoder) => return encoder.encode(frame),
         }
@@ -184,7 +193,7 @@ mod tests {
     #[ignore = "requires the Windows Media Foundation H.264 encoder"]
     fn media_foundation_encodes_idr_and_predictive_frames() -> Result<()> {
         let (width, height) = (640, 480);
-        let mut encoder = MediaFoundationEncoder::new(width, height)?;
+        let mut encoder = MediaFoundationEncoder::new(width, height, 1_500_000)?;
         let mut frame = Frame {
             width,
             height,
@@ -201,6 +210,12 @@ mod tests {
             next.windows(4)
                 .any(|bytes| bytes[..3] == [0, 0, 1] && matches!(bytes[3] & 0x1f, 1 | 5)),
             "second access unit lacks a picture"
+        );
+        drop(encoder);
+        let mut reduced = MediaFoundationEncoder::new(width, height, 500_000)?;
+        assert!(
+            ready_to_decode(&reduced.encode(&frame)?),
+            "first access unit after reducing bitrate lacks SPS/PPS or IDR"
         );
         Ok(())
     }

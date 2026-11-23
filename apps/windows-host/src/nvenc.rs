@@ -43,21 +43,35 @@ pub struct Encoder {
     width: u32,
     height: u32,
     frame_index: u32,
+    bitrate: u32,
 }
 
 // The encoder exclusively owns its handles. Callers serialize access to the
 // session and its immediate context, including capture callbacks.
 unsafe impl Send for Encoder {}
 
+pub(crate) fn target_bitrate(width: u32, height: u32, limit: u32) -> u32 {
+    let native = width
+        .saturating_mul(height)
+        .saturating_mul(2)
+        .max(1_500_000);
+    if limit == 0 {
+        native
+    } else {
+        native.min(limit)
+    }
+}
+
 impl Encoder {
-    pub fn new(width: u32, height: u32) -> Result<Self> {
+    pub fn new(width: u32, height: u32, limit: u32) -> Result<Self> {
         let (device, context) = nvidia_device()?;
-        Self::with_device(width, height, device, context)
+        Self::with_device(width, height, limit, device, context)
     }
 
     pub fn from_capture_device(
         width: u32,
         height: u32,
+        limit: u32,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
     ) -> Result<Self> {
@@ -65,12 +79,13 @@ impl Encoder {
         if unsafe { dxgi.GetAdapter()?.GetDesc()? }.VendorId != 0x10de {
             return Err("A captura está em outro adaptador".into());
         }
-        Self::with_device(width, height, device.clone(), context.clone())
+        Self::with_device(width, height, limit, device.clone(), context.clone())
     }
 
     fn with_device(
         width: u32,
         height: u32,
+        limit: u32,
         device: ID3D11Device,
         context: ID3D11DeviceContext,
     ) -> Result<Self> {
@@ -141,6 +156,7 @@ impl Encoder {
             width,
             height,
             frame_index: 0,
+            bitrate: target_bitrate(width, height, limit),
             registered: ptr::null_mut(),
             bitstream: ptr::null_mut(),
         };
@@ -166,7 +182,7 @@ impl Encoder {
         preset.presetCfg.frameIntervalP = 1;
         let rate = &mut preset.presetCfg.rcParams;
         rate.rateControlMode = NV_ENC_PARAMS_RC_MODE::CBR;
-        rate.averageBitRate = (self.width * self.height * 2).max(1_500_000);
+        rate.averageBitRate = self.bitrate;
         rate.maxBitRate = rate.averageBitRate;
         rate.vbvBufferSize = rate.averageBitRate / 30;
         rate.vbvInitialDelay = rate.vbvBufferSize;
@@ -232,8 +248,9 @@ impl Encoder {
         self.encode_uploaded(false)
     }
 
-    pub fn matches(&self, width: u32, height: u32) -> bool {
+    pub fn matches(&self, width: u32, height: u32, limit: u32) -> bool {
         (self.width, self.height) == (width, height)
+            && self.bitrate == target_bitrate(width, height, limit)
     }
 
     pub fn encode_capture_texture(

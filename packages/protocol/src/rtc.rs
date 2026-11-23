@@ -102,8 +102,13 @@ impl VideoPeer {
         Ok(())
     }
 
-    pub fn capture_interval_ms(&self) -> Option<u32> {
+    pub fn bitrate_budget(&self) -> Option<u32> {
         let budget = self.estimated_bps?.saturating_mul(4) / 5;
+        Some(budget.clamp(1, u64::from(u32::MAX)) as u32)
+    }
+
+    pub fn capture_interval_ms(&self) -> Option<u32> {
+        let budget = u64::from(self.bitrate_budget()?);
         let interval = self.average_frame_bits?.saturating_mul(1000) / budget.max(1);
         // Preserve capture responsiveness while reducing the number of encoded frames.
         Some(interval.clamp(33, 200) as u32)

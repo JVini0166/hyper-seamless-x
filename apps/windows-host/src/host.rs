@@ -289,6 +289,7 @@ struct CaptureQueue {
     dropped: AtomicU32,
     force_keyframe: AtomicBool,
     interval_ms: AtomicU32,
+    bitrate_limit: AtomicU32,
 }
 
 enum CapturedPacket {
@@ -397,15 +398,17 @@ impl GraphicsCaptureApiHandler for Capture {
 impl Capture {
     fn encode_gpu(&mut self, frame: &CaptureFrame, width: u32, height: u32) -> Result<Vec<u8>> {
         let force_keyframe = self.latest.force_keyframe.swap(false, Ordering::AcqRel);
+        let bitrate_limit = self.latest.bitrate_limit.load(Ordering::Relaxed);
         let first = !self
             .gpu_encoder
             .as_ref()
-            .is_some_and(|encoder| encoder.matches(width, height));
+            .is_some_and(|encoder| encoder.matches(width, height, bitrate_limit));
         if first {
             self.gpu_encoder = None;
             self.gpu_encoder = Some(crate::nvenc::Encoder::from_capture_device(
                 width,
                 height,
+                bitrate_limit,
                 &self.device,
                 &self.device_context,
             )?);
@@ -470,9 +473,21 @@ fn capture(
         let mut last_write = Instant::now();
         let mut last_heartbeat = Instant::now();
         let mut last_keyframe_request = None;
+        let mut last_bitrate_change = None;
         while !control.is_finished() && !stop.load(Ordering::Acquire) {
             if let Some(peer) = rtc.as_mut() {
                 peer.poll()?;
+                if let Some(budget) = peer.bitrate_budget() {
+                    let bitrate = budget.clamp(500_000, 20_000_000);
+                    let current = latest.bitrate_limit.load(Ordering::Relaxed);
+                    let changed = current.abs_diff(bitrate) >= (current / 5).max(250_000);
+                    let settled = last_bitrate_change
+                        .is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(2));
+                    if changed && settled {
+                        latest.bitrate_limit.store(bitrate, Ordering::Relaxed);
+                        last_bitrate_change = Some(Instant::now());
+                    }
+                }
                 if let Some(interval_ms) = peer.capture_interval_ms() {
                     latest.interval_ms.store(interval_ms, Ordering::Relaxed);
                 }
@@ -521,7 +536,8 @@ fn capture(
                     if latest.force_keyframe.swap(false, Ordering::AcqRel) {
                         encoder = None;
                     }
-                    let encoded = encode_h264_frame(&mut encoder, &frame);
+                    let bitrate_limit = latest.bitrate_limit.load(Ordering::Relaxed);
+                    let encoded = encode_h264_frame(&mut encoder, &frame, bitrate_limit);
                     match encoded {
                         Ok((unit, mode)) => {
                             if let Some(peer) = rtc.as_mut() {
@@ -575,14 +591,19 @@ fn capture(
 fn encode_h264_frame(
     encoder: &mut Option<crate::h264::Encoder>,
     frame: &Frame,
+    bitrate_limit: u32,
 ) -> Result<(Vec<u8>, protocol::EncoderMode)> {
     if !encoder
         .as_ref()
-        .is_some_and(|encoder| encoder.matches(frame))
+        .is_some_and(|encoder| encoder.matches(frame, bitrate_limit))
     {
         // Release the previous COM session before initializing a new format.
         *encoder = None;
-        *encoder = Some(crate::h264::Encoder::new(frame.width, frame.height)?);
+        *encoder = Some(crate::h264::Encoder::new(
+            frame.width,
+            frame.height,
+            bitrate_limit,
+        )?);
     }
     let encoder = encoder.as_mut().ok_or("Encoder indisponível")?;
     let packet = encoder.encode(frame)?;

@@ -49,7 +49,7 @@ static HRESULT make_type(UINT32 width, UINT32 height, REFGUID subtype, IMFMediaT
     return S_OK;
 }
 
-static HRESULT initialize(Encoder &encoder, UINT32 width, UINT32 height) {
+static HRESULT initialize(Encoder &encoder, UINT32 width, UINT32 height, UINT32 bitrate) {
     HSX_TRY(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
     encoder.com_started = true;
     HSX_TRY(MFStartup(MF_VERSION, MFSTARTUP_LITE));
@@ -70,7 +70,6 @@ static HRESULT initialize(Encoder &encoder, UINT32 width, UINT32 height) {
     ComPtr<IMFMediaType> input;
     ComPtr<IMFMediaType> output;
     HSX_TRY(make_type(width, height, MFVideoFormat_H264, &output));
-    const UINT32 bitrate = (width * height * 2 > 1500000) ? width * height * 2 : 1500000;
     HSX_TRY(output->SetUINT32(MF_MT_AVG_BITRATE, bitrate));
     HSX_TRY(output->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base));
     HSX_TRY(encoder.transform->SetOutputType(0, output.Get(), 0));
@@ -170,10 +169,10 @@ static HRESULT encode(Encoder &encoder, const std::uint8_t *pixels) {
     return S_OK;
 }
 
-extern "C" HRESULT hsx_encoder_create(UINT32 width, UINT32 height, Encoder **out) {
+extern "C" HRESULT hsx_encoder_create(UINT32 width, UINT32 height, UINT32 bitrate, Encoder **out) {
     auto *encoder = new (std::nothrow) Encoder();
     if (!encoder) return E_OUTOFMEMORY;
-    const HRESULT status = initialize(*encoder, width, height);
+    const HRESULT status = initialize(*encoder, width, height, bitrate);
     if (FAILED(status)) {
         delete encoder;
         return status;
