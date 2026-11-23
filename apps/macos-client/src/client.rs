@@ -1546,9 +1546,12 @@ impl RemoteView {
                                 if let Some(metrics) = frame.diagnostics.clone() {
                                     this.diagnostics = Some(metrics);
                                 }
-                                if this.frame.as_ref().is_none_or(|previous| {
-                                    (previous.width, previous.height) != (frame.width, frame.height)
-                                }) {
+                                if !native_live_resize(window)
+                                    && this.frame.as_ref().is_none_or(|previous| {
+                                        (previous.width, previous.height)
+                                            != (frame.width, frame.height)
+                                    })
+                                {
                                     set_native_geometry(window, frame.width, frame.height);
                                 }
                                 if let Some(previous) = this.frame.replace(frame) {
