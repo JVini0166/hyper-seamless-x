@@ -107,6 +107,14 @@ pub enum Request {
         y: u16,
         button: PointerButton,
     },
+    Scroll {
+        handle: u64,
+        process_id: u32,
+        x: u16,
+        y: u16,
+        horizontal: i16,
+        vertical: i16,
+    },
     Key {
         handle: u64,
         process_id: u32,

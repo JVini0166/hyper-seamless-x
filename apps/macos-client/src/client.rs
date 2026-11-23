@@ -552,6 +552,7 @@ struct RemoteView {
     input: async_channel::Sender<Request>,
     target: (u64, u32),
     focus: gpui::FocusHandle,
+    scroll_remainder: (f64, f64),
     input_error: Option<String>,
 }
 
@@ -700,6 +701,7 @@ impl RemoteView {
             input,
             target,
             focus,
+            scroll_remainder: (0., 0.),
             input_error: None,
         }
     }
@@ -810,14 +812,32 @@ impl RemoteView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(frame) = &self.frame else {
-            return;
-        };
+        if let Some((x, y)) = self.pointer_position(position, window) {
+            let (handle, process_id) = self.target;
+            self.queue(
+                Request::Click {
+                    handle,
+                    process_id,
+                    x,
+                    y,
+                    button,
+                },
+                cx,
+            );
+        }
+    }
+
+    fn pointer_position(
+        &self,
+        position: gpui::Point<gpui::Pixels>,
+        window: &Window,
+    ) -> Option<(u16, u16)> {
+        let frame = self.frame.as_ref()?;
         let viewport = window.viewport_size();
         let (width, height) = (f64::from(frame.width), f64::from(frame.height));
         let scale = (viewport.width.to_f64() / width).min(viewport.height.to_f64() / height);
         if scale <= 0. {
-            return;
+            return None;
         }
         let normalized = |position, viewport: gpui::Pixels, image: f64| {
             let rendered = image * scale;
@@ -825,15 +845,37 @@ impl RemoteView {
         };
         let x = normalized(position.x.to_f64(), viewport.width, width);
         let y = normalized(position.y.to_f64(), viewport.height, height);
-        if (0. ..1.).contains(&x) && (0. ..1.).contains(&y) {
+        ((0. ..1.).contains(&x) && (0. ..1.).contains(&y))
+            .then(|| ((x * 65535.).round() as u16, (y * 65535.).round() as u16))
+    }
+
+    fn scroll(&mut self, event: &gpui::ScrollWheelEvent, window: &Window, cx: &mut Context<Self>) {
+        let Some((x, y)) = self.pointer_position(event.position, window) else {
+            self.scroll_remainder = (0., 0.);
+            return;
+        };
+        if matches!(event.touch_phase, gpui::TouchPhase::Started) {
+            self.scroll_remainder = (0., 0.);
+        }
+        let delta = event.delta.pixel_delta(px(40.));
+        let wheel_steps = |carry: &mut f64, delta: f64| {
+            *carry += delta / 40.;
+            let steps = carry.trunc();
+            *carry -= steps;
+            steps.clamp(-8., 8.) as i16
+        };
+        let horizontal = wheel_steps(&mut self.scroll_remainder.0, -delta.x.to_f64());
+        let vertical = wheel_steps(&mut self.scroll_remainder.1, delta.y.to_f64());
+        if horizontal != 0 || vertical != 0 {
             let (handle, process_id) = self.target;
             self.queue(
-                Request::Click {
+                Request::Scroll {
                     handle,
                     process_id,
-                    x: (x * 65535.).round() as u16,
-                    y: (y * 65535.).round() as u16,
-                    button,
+                    x,
+                    y,
+                    horizontal,
+                    vertical,
                 },
                 cx,
             );
@@ -897,6 +939,7 @@ impl Render for RemoteView {
             .relative()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event, _, cx| this.key_down(event, cx)))
+            .on_scroll_wheel(cx.listener(|view, event, window, cx| view.scroll(event, window, cx)))
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {

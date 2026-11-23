@@ -208,6 +208,23 @@ fn handle(
             };
             protocol::send(&mut stream, &response)
         }
+        Request::Scroll {
+            handle,
+            process_id,
+            x,
+            y,
+            horizontal,
+            vertical,
+        } => {
+            let result = find_window(handle, process_id)?
+                .ok_or_else(|| protocol::Error::from("Janela indisponível"))
+                .and_then(|window| scroll_window(window, x, y, horizontal, vertical));
+            let response = match result {
+                Ok(()) => Response::Controlled,
+                Err(error) => Response::Error(error.to_string()),
+            };
+            protocol::send(&mut stream, &response)
+        }
         Request::Key {
             handle,
             process_id,
@@ -357,6 +374,38 @@ fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool) -> Result<()>
 }
 
 fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton) -> Result<()> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+    let flags = match button {
+        protocol::PointerButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        protocol::PointerButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+    };
+    pointer_window(window, x, y, &[(flags.0, 0), (flags.1, 0)], true)
+}
+
+fn scroll_window(window: Window, x: u16, y: u16, horizontal: i16, vertical: i16) -> Result<()> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+    let flags = [
+        (MOUSEEVENTF_HWHEEL, horizontal),
+        (MOUSEEVENTF_WHEEL, vertical),
+    ];
+    let events: Vec<_> = flags
+        .into_iter()
+        .filter(|(_, steps)| *steps != 0)
+        .map(|(flag, steps)| (flag, i32::from(steps.clamp(-8, 8)) * 120))
+        .collect();
+    if events.is_empty() {
+        return Ok(());
+    }
+    pointer_window(window, x, y, &events, false)
+}
+
+fn pointer_window(
+    window: Window,
+    x: u16,
+    y: u16,
+    events: &[(u32, i32)],
+    click: bool,
+) -> Result<()> {
     use windows_sys::Win32::{
         Foundation::{POINT, RECT},
         Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
@@ -401,31 +450,31 @@ fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton)
             || GetForegroundWindow() != hwnd
             || GetAncestor(WindowFromPoint(point), GA_ROOT) != hwnd
         {
-            return Err("O destino do clique mudou".into());
+            return Err("O destino do ponteiro mudou".into());
         }
-        let (down, up) = match button {
-            protocol::PointerButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-            protocol::PointerButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-        };
-        let inputs = [down, up].map(|flags| INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dwFlags: flags,
-                    ..Default::default()
+        let inputs: Vec<_> = events
+            .iter()
+            .map(|&(flags, data)| INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dwFlags: flags,
+                        mouseData: data as u32,
+                        ..Default::default()
+                    },
                 },
-            },
-        });
+            })
+            .collect();
         let sent = SendInput(
             inputs.len() as u32,
             inputs.as_ptr(),
             size_of::<INPUT>() as i32,
         );
         if sent != inputs.len() as u32 {
-            if sent == 1 {
+            if click && sent == 1 {
                 SendInput(1, &inputs[1], size_of::<INPUT>() as i32);
             }
-            return Err("O Windows recusou o clique".into());
+            return Err("O Windows recusou a entrada do ponteiro".into());
         }
     }
     Ok(())
