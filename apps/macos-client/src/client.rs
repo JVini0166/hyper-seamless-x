@@ -350,7 +350,9 @@ impl Launcher {
                             Err(error) => view.status = error.to_string(),
                         }
                     }
-                    Some(Update::Closed(error)) => view.status = error,
+                    Some(Update::Closed(error) | Update::Reconnecting(error)) => {
+                        view.status = error
+                    }
                     None => {
                         view.status = format!(
                             "Sem imagem de {title}. Confira se a janela está aberta no Windows."
@@ -584,6 +586,7 @@ impl InputSession {
 struct RemoteView {
     frame: Option<VideoFrame>,
     status: SharedString,
+    reconnecting: Option<String>,
     _task: Task<()>,
     _chrome_task: Task<()>,
     _input_task: Task<()>,
@@ -602,10 +605,16 @@ struct VideoFrame {
 
 enum Update {
     Image(VideoFrame),
+    Reconnecting(String),
     Closed(String),
 }
 
-fn read_video(host: Host, info: WindowInfo, updates: &async_channel::Sender<Update>) -> Result<()> {
+fn read_video(
+    host: &Host,
+    info: &WindowInfo,
+    updates: &async_channel::Sender<Update>,
+    delivered: &mut bool,
+) -> Result<()> {
     let (response, mut stream) = host.request(Request::View {
         handle: info.handle,
         process_id: info.process_id,
@@ -632,6 +641,7 @@ fn read_video(host: Host, info: WindowInfo, updates: &async_channel::Sender<Upda
             {
                 break;
             }
+            *delivered = true;
         }
     }
     Ok(())
@@ -640,11 +650,69 @@ fn read_video(host: Host, info: WindowInfo, updates: &async_channel::Sender<Upda
 fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> {
     let (sender, receiver) = async_channel::bounded(1);
     thread::spawn(move || {
-        if let Err(error) = read_video(host, info, &sender) {
-            let _ = sender.force_send(Update::Closed(format!("Transmissão encerrada · {error}")));
+        let mut has_opened = false;
+        let mut retries = 0;
+        loop {
+            let mut delivered = false;
+            let outcome = read_video(&host, &info, &sender, &mut delivered);
+            let Err(error) = outcome else {
+                break;
+            };
+            if sender.is_closed() {
+                break;
+            }
+            if delivered {
+                has_opened = true;
+                retries = 0;
+            }
+            if !has_opened || retries == 5 || !transient_video_error(&error) {
+                let _ = sender
+                    .send_blocking(Update::Closed(format!("Transmissão encerrada · {error}")));
+                break;
+            }
+            retries += 1;
+            let wait = Duration::from_millis(250 << retries);
+            if sender
+                .send_blocking(Update::Reconnecting(format!(
+                    "Reconectando à janela do Windows · {retries}/5"
+                )))
+                .is_err()
+            {
+                break;
+            }
+            let deadline = Instant::now() + wait;
+            while !sender.is_closed() && Instant::now() < deadline {
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50)),
+                );
+            }
+            if sender.is_closed() {
+                break;
+            }
         }
     });
     receiver
+}
+
+fn transient_video_error(error: &protocol::Error) -> bool {
+    use std::io::ErrorKind::*;
+    error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+        matches!(
+            error.kind(),
+            UnexpectedEof
+                | BrokenPipe
+                | TimedOut
+                | WouldBlock
+                | ConnectionReset
+                | ConnectionAborted
+                | ConnectionRefused
+                | NotConnected
+                | NetworkUnreachable
+                | HostUnreachable
+        )
+    })
 }
 
 impl RemoteView {
@@ -703,12 +771,24 @@ impl RemoteView {
             while let Ok(update) = receiver.recv().await {
                 if view
                     .update_in(cx, |this, window, cx| {
-                        if let Some(previous) = this.frame.take() {
-                            let _ = window.drop_image(previous.image);
-                        }
                         match update {
-                            Update::Image(frame) => this.frame = Some(frame),
-                            Update::Closed(message) => this.status = message.into(),
+                            Update::Image(frame) => {
+                                if let Some(previous) = this.frame.replace(frame) {
+                                    let _ = window.drop_image(previous.image);
+                                }
+                                this.reconnecting = None;
+                            }
+                            Update::Reconnecting(message) => {
+                                this.reconnecting = Some(message);
+                                this.input_error = None;
+                            }
+                            Update::Closed(message) => {
+                                if let Some(previous) = this.frame.take() {
+                                    let _ = window.drop_image(previous.image);
+                                }
+                                this.reconnecting = None;
+                                this.status = message.into();
+                            }
                         }
                         cx.notify();
                     })
@@ -746,6 +826,7 @@ impl RemoteView {
         Self {
             frame: Some(frame),
             status: "Aguardando imagem do Windows…".into(),
+            reconnecting: None,
             _task: task,
             _chrome_task: chrome_task,
             _input_task: input_task,
@@ -920,6 +1001,9 @@ impl RemoteView {
     }
 
     fn queue(&mut self, request: protocol::InputEvent, cx: &mut Context<Self>) {
+        if self.reconnecting.is_some() {
+            return;
+        }
         if self.input.try_send((Instant::now(), request)).is_err() {
             self.input_error = Some("A fila de entrada está ocupada".into());
             cx.notify();
@@ -991,19 +1075,24 @@ impl Render for RemoteView {
                 view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
             })
             .when(self.frame.is_none(), |view| view.child(self.status.clone()))
-            .when_some(self.input_error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .absolute()
-                        .bottom_2()
-                        .left_2()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(rgb(0x291719))
-                        .text_sm()
-                        .child(error),
-                )
-            })
+            .when_some(
+                self.reconnecting
+                    .clone()
+                    .or_else(|| self.input_error.clone()),
+                |view, error| {
+                    view.child(
+                        div()
+                            .absolute()
+                            .bottom_2()
+                            .left_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x291719))
+                            .text_sm()
+                            .child(error),
+                    )
+                },
+            )
     }
 }

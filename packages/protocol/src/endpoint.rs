@@ -101,7 +101,10 @@ impl Endpoint {
                         Some(ws_config()),
                         None,
                     )
-                    .map_err(|error| io::Error::other(error.to_string()))?;
+                    .map_err(|error| match error {
+                        tungstenite::HandshakeError::Failure(error) => websocket_error(error),
+                        error => io::Error::other(error.to_string()),
+                    })?;
                     return Ok(Wire(Box::new(SocketWire::new(ws))));
                 }
                 Err(error) => last_error = Some(error),
@@ -263,6 +266,18 @@ impl<S: Read + Write> Write for SocketWire<S> {
 fn websocket_error(error: tungstenite::Error) -> io::Error {
     match error {
         tungstenite::Error::Io(error) => error,
+        tungstenite::Error::ConnectionClosed
+        | tungstenite::Error::Protocol(
+            tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+        ) => io::Error::new(io::ErrorKind::UnexpectedEof, error.to_string()),
+        tungstenite::Error::Http(ref response)
+            if matches!(response.status().as_u16(), 502..=504) =>
+        {
+            io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("O túnel retornou HTTP {}", response.status()),
+            )
+        }
         error => io::Error::other(error.to_string()),
     }
 }
