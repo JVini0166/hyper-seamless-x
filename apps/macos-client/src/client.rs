@@ -38,6 +38,13 @@ impl Host {
         })
     }
 
+    fn at_address(&self, address: Endpoint) -> Result<Self> {
+        Self::from_profile(ConnectionProfile {
+            address,
+            pairing: self.pairing.clone(),
+        })
+    }
+
     fn request(&self, request: Request) -> Result<(Response, StreamOwned<ClientConnection, Wire>)> {
         let socket = self.addr.connect(Duration::from_secs(8))?;
         self.request_on(socket, request)
@@ -357,6 +364,53 @@ impl Launcher {
             self.refresh(cx);
             return;
         }
+        if let Some(host) = self.host.as_ref() {
+            let candidate = match host.at_address(addr.clone()) {
+                Ok(host) => host,
+                Err(error) => {
+                    self.status = format!("Falha ao carregar o pareamento · {error}");
+                    cx.notify();
+                    return;
+                }
+            };
+            self.status = format!("Verificando o pareamento em {addr}…");
+            let request = cx.background_executor().spawn(async move {
+                let catalog = candidate.list()?;
+                Ok::<_, protocol::Error>((candidate, catalog))
+            });
+            self.task = Some(cx.spawn(async move |view, cx| {
+                let result = request.await;
+                let _ = view.update(cx, |view, cx| {
+                    view.task = None;
+                    match result {
+                        Ok((host, (windows, apps))) => {
+                            let profile = ConnectionProfile {
+                                address: host.addr.clone(),
+                                pairing: host.pairing.clone(),
+                            };
+                            match save_profile(&profile) {
+                                Ok(()) => {
+                                    view.clear_remote_views(cx);
+                                    view.host = Some(host);
+                                    view.set_catalog(windows, apps);
+                                }
+                                Err(error) => {
+                                    view.status = format!("Falha ao salvar endereço · {error}")
+                                }
+                            }
+                        }
+                        Err(_) => view.begin_enrollment(addr, cx),
+                    }
+                    cx.notify();
+                });
+            }));
+            cx.notify();
+            return;
+        }
+        self.begin_enrollment(addr, cx);
+    }
+
+    fn begin_enrollment(&mut self, addr: Endpoint, cx: &mut Context<Self>) {
         let (sender, receiver) = async_channel::bounded(2);
         self.task = None;
         self.windows.clear();
@@ -428,6 +482,7 @@ impl Launcher {
         }) {
             Ok(host) => {
                 self.task = None;
+                self.clear_remote_views(cx);
                 self.host = Some(host);
                 self.refresh(cx);
             }
@@ -446,17 +501,21 @@ impl Launcher {
             Ok(()) => {
                 self.task = None;
                 self.host = None;
-                self.windows.clear();
-                self.launchable_apps.clear();
-                self.opening.clear();
-                for (_, handle) in self.open_windows.drain() {
-                    let _ = handle.update(cx, |_, window, _| window.remove_window());
-                }
+                self.clear_remote_views(cx);
                 self.status = "Autorize um novo pareamento no Windows e conecte novamente.".into();
             }
             Err(error) => self.status = format!("Falha ao esquecer endereço · {error}"),
         }
         cx.notify();
+    }
+
+    fn clear_remote_views(&mut self, cx: &mut Context<Self>) {
+        self.windows.clear();
+        self.launchable_apps.clear();
+        self.opening.clear();
+        for (_, handle) in self.open_windows.drain() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
     }
 
     fn open_remote(&mut self, info: WindowInfo, window: &mut Window, cx: &mut Context<Self>) {
@@ -1955,10 +2014,12 @@ mod tests {
         let address = Endpoint::parse(&listener.local_addr()?.to_string())?;
         let (pairing, key) = protocol::new_identity()?;
         let config = Arc::new(pairing.server_config(key)?);
-        let host = Host::from_profile(ConnectionProfile {
-            address,
+        let previous = Host::from_profile(ConnectionProfile {
+            address: Endpoint::parse("127.0.0.1:47651")?,
             pairing: pairing.clone(),
         })?;
+        let host = previous.at_address(address)?;
+        assert_ne!(host.addr, previous.addr);
         let server = thread::spawn(move || -> Result<()> {
             for reply in [
                 Some(Response::WindowCatalog {
