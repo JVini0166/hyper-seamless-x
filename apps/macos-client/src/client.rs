@@ -329,7 +329,7 @@ impl Launcher {
             return;
         }
         let title = info.title.clone();
-        let frames = start_video(host, info);
+        let frames = start_video(host.clone(), info.clone());
         self.status = format!("Abrindo {title}…");
         cx.spawn_in(window, async move |view, cx| {
             let timeout = cx.background_executor().timer(Duration::from_secs(15));
@@ -344,7 +344,7 @@ impl Launcher {
                     Some(Update::Image(frame)) => {
                         let options = remote_options(window, &title, &frame, cx);
                         match cx.open_window(options, |window, cx| {
-                            cx.new(|cx| RemoteView::new(frame, frames, window, cx))
+                            cx.new(|cx| RemoteView::new(frame, frames, host, info, window, cx))
                         }) {
                             Ok(_) => view.status = format!("{title} aberto"),
                             Err(error) => view.status = error.to_string(),
@@ -548,6 +548,9 @@ struct RemoteView {
     status: SharedString,
     _task: Task<()>,
     _chrome_task: Task<()>,
+    _input_task: Task<()>,
+    input: async_channel::Sender<(u16, u16, protocol::PointerButton)>,
+    input_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -608,10 +611,47 @@ impl RemoteView {
     fn new(
         frame: VideoFrame,
         receiver: async_channel::Receiver<Update>,
+        host: Host,
+        info: WindowInfo,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         set_native_aspect(window, frame.width, frame.height);
+        let (input, requests) = async_channel::bounded(4);
+        let input_task = cx.spawn(async move |view, cx| {
+            while let Ok((x, y, button)) = requests.recv().await {
+                let host = host.clone();
+                let (handle, process_id) = (info.handle, info.process_id);
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        match host
+                            .request(Request::Click {
+                                handle,
+                                process_id,
+                                x,
+                                y,
+                                button,
+                            })?
+                            .0
+                        {
+                            Response::Controlled => Ok(()),
+                            _ => Err(protocol::Error::from("Resposta de clique inesperada")),
+                        }
+                    })
+                    .await;
+                if view
+                    .update(cx, |view, cx| {
+                        view.input_error = result.err().map(|error| error.to_string());
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
         let task = cx.spawn_in(window, async move |view, cx| {
             while let Ok(update) = receiver.recv().await {
                 if view
@@ -661,6 +701,9 @@ impl RemoteView {
             status: "Aguardando imagem do Windows…".into(),
             _task: task,
             _chrome_task: chrome_task,
+            _input_task: input_task,
+            input,
+            input_error: None,
         }
     }
 }
@@ -762,10 +805,77 @@ fn set_native_buttons(window: &Window, visible: bool) {
     }
 }
 
+impl RemoteView {
+    fn click(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        button: protocol::PointerButton,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(frame) = &self.frame else {
+            return;
+        };
+        let viewport = window.viewport_size();
+        let (width, height) = (f64::from(frame.width), f64::from(frame.height));
+        let scale = (viewport.width.to_f64() / width).min(viewport.height.to_f64() / height);
+        if scale <= 0. {
+            return;
+        }
+        let normalized = |position, viewport: gpui::Pixels, image: f64| {
+            let rendered = image * scale;
+            (position - (viewport.to_f64() - rendered) / 2.) / rendered
+        };
+        let x = normalized(position.x.to_f64(), viewport.width, width);
+        let y = normalized(position.y.to_f64(), viewport.height, height);
+        if (0. ..1.).contains(&x)
+            && (0. ..1.).contains(&y)
+            && self
+                .input
+                .try_send((
+                    (x * 65535.).round() as u16,
+                    (y * 65535.).round() as u16,
+                    button,
+                ))
+                .is_err()
+        {
+            self.input_error = Some("A fila de cliques está ocupada".into());
+            cx.notify();
+        }
+    }
+}
+
 impl Render for RemoteView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .relative()
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.click(event.position, protocol::PointerButton::Left, window, cx);
+                }),
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Right,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.click(event.position, protocol::PointerButton::Right, window, cx);
+                }),
+            )
+            .when_some(self.input_error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(0x291719))
+                        .text_sm()
+                        .child(error),
+                )
+            })
             .flex()
             .items_center()
             .justify_center()

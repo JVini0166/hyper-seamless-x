@@ -100,11 +100,24 @@ pub enum Request {
         process_id: u32,
     },
     Launch(LaunchApp),
+    Click {
+        handle: u64,
+        process_id: u32,
+        x: u16,
+        y: u16,
+        button: PointerButton,
+    },
     Control {
         handle: u64,
         process_id: u32,
         action: WindowAction,
     },
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub enum PointerButton {
+    Left,
+    Right,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
