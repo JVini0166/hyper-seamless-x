@@ -239,6 +239,7 @@ mod tests {
         let frame = decoder.decode(sample)?.expect("missing 4K picture");
         assert_eq!((frame.width, frame.height), (4096, 2160));
         assert_eq!(frame.bgra.len(), protocol::MAX_PIXELS * 4);
+        assert!(frame.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
         for offset in [0, frame.bgra.len() / 2, frame.bgra.len() - 4] {
             let pixel = &frame.bgra[offset..offset + 4];
             assert!(pixel[0] > 200 && pixel[1] < 25 && pixel[2] < 25);

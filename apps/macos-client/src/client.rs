@@ -976,8 +976,11 @@ fn read_video(
             }
             let frame = packet.frame;
             let mut pixels = frame.bgra;
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel[3] = 255;
+            // VideoToolbox produces opaque BGRA. Window capture may supply unused alpha.
+            if decoder.is_none() {
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel[3] = 255;
+                }
             }
             let buffer = image::RgbaImage::from_raw(frame.width, frame.height, pixels)
                 .ok_or("Frame inválido")?;

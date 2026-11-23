@@ -39,11 +39,14 @@ static void on_image(void *context, void *source, OSStatus status,
     if (out->result != noErr) return;
     const uint8_t *base = CVPixelBufferGetBaseAddress(image);
     const size_t stride = CVPixelBufferGetBytesPerRow(image);
+    const size_t visible_bytes = out->width * 4;
     if (base == NULL) {
         out->result = kVTVideoDecoderBadDataErr;
+    } else if (stride == visible_bytes) {
+        memcpy(out->bytes, base, visible_bytes * out->height);
     } else {
         for (size_t row = 0; row < out->height; ++row) {
-            memcpy(out->bytes + row * out->width * 4, base + row * stride, out->width * 4);
+            memcpy(out->bytes + row * visible_bytes, base + row * stride, visible_bytes);
         }
     }
     CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
