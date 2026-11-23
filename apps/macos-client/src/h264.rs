@@ -202,6 +202,37 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "local performance measurement"]
+    fn benchmark_4k_decode() -> Result<()> {
+        use std::time::Instant;
+
+        let sample = include_bytes!("../../../tests/fixtures/blue-4096x2160.h264");
+        let mut decoder = Decoder::default();
+        for _ in 0..8 {
+            assert!(decoder.decode(sample)?.is_some());
+        }
+        let mut milliseconds = [0.0; 120];
+        let started = Instant::now();
+        for duration in &mut milliseconds {
+            let frame_started = Instant::now();
+            let frame = decoder.decode(sample)?.expect("missing 4K picture");
+            *duration = frame_started.elapsed().as_secs_f64() * 1000.;
+            std::hint::black_box(frame);
+        }
+        let throughput = milliseconds.len() as f64 / started.elapsed().as_secs_f64();
+        milliseconds.sort_by(f64::total_cmp);
+        let percentile = |p: usize| milliseconds[(milliseconds.len() * p).div_ceil(100) - 1];
+        eprintln!(
+            "4K H.264 decode {:?} · 120 frames · {:.1} fps · p50 {:.2} ms · p95 {:.2} ms",
+            decoder.mode(),
+            throughput,
+            percentile(50),
+            percentile(95)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn decodes_full_width_4k_h264_at_the_capture_limit() -> Result<()> {
         let sample = include_bytes!("../../../tests/fixtures/blue-4096x2160.h264");
         let mut decoder = Decoder::default();
