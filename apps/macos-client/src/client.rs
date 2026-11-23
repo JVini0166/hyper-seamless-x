@@ -422,6 +422,9 @@ impl Launcher {
                             Err(error) => view.status = error.to_string(),
                         }
                     }
+                    Some(Update::Finished) => {
+                        view.status = "Transmissão encerrada no Windows".into();
+                    }
                     Some(Update::Closed(error) | Update::Reconnecting(error)) => {
                         view.status = error
                     }
@@ -731,6 +734,7 @@ enum Update {
     Image(VideoFrame),
     Reconnecting(String),
     Closed(String),
+    Finished,
 }
 
 enum VideoEnd {
@@ -793,6 +797,9 @@ fn read_video(
         let packet = if let Some(h264_decoder) = &mut decoder {
             let unit = if let Some((peer, control)) = rtc.as_mut() {
                 let now = Instant::now();
+                if control.try_recv().is_ok() {
+                    return Err(protocol::VideoFinished.into());
+                }
                 if control.is_closed()
                     || (!*delivered && now >= startup_deadline)
                     || keyframe_wait.is_some_and(|deadline| now >= deadline)
@@ -894,9 +901,14 @@ fn monitor_rtc_control(
     let (keepalive, control) = async_channel::bounded(1);
     thread::spawn(move || {
         while !keepalive.is_closed() {
-            if !matches!(protocol::receive_h264_access_unit(&mut stream), Ok(None)) {
-                break;
+            match protocol::receive_h264_access_unit(&mut stream) {
+                Ok(None) => continue,
+                Err(error) if error.is::<protocol::VideoFinished>() => {
+                    let _ = keepalive.try_send(());
+                }
+                _ => {}
             }
+            break;
         }
     });
     control
@@ -1015,6 +1027,10 @@ fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> 
                 }
                 Ok(VideoEnd::DecoderRejected(error)) | Err(error) => error,
             };
+            if error.is::<protocol::VideoFinished>() {
+                let _ = sender.send_blocking(Update::Finished);
+                break;
+            }
             if !has_opened || retries == 5 || !transient_video_error(&error) {
                 let _ = sender
                     .send_blocking(Update::Closed(format!("Transmissão encerrada · {error}")));
@@ -1137,6 +1153,7 @@ impl RemoteView {
                                 this.reconnecting = Some(message);
                                 this.input_error = None;
                             }
+                            Update::Finished => window.remove_window(),
                             Update::Closed(message) => {
                                 if let Some(previous) = this.frame.take() {
                                     let _ = window.drop_image(previous.image);
@@ -1641,6 +1658,7 @@ mod tests {
                         bgra: vec![0; 24],
                     }
                     .send(&mut stream)?;
+                    protocol::finish_video(&mut stream)?;
                 }
             }
             Ok(())
@@ -1656,7 +1674,7 @@ mod tests {
         );
         let (observed, events) = mpsc::sync_channel(1);
         let relay = thread::spawn(move || -> Result<()> {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 observed.send(updates.recv_blocking()?)?;
             }
             Ok(())
@@ -1665,6 +1683,7 @@ mod tests {
         assert!(matches!(next()?, Update::Image(frame) if (frame.width, frame.height) == (32, 24)));
         received_rtc.send(())?;
         assert!(matches!(next()?, Update::Image(frame) if (frame.width, frame.height) == (3, 2)));
+        assert!(matches!(next()?, Update::Finished));
         relay.join().expect("video update relay panicked")?;
         server.join().expect("test host panicked")?;
         Ok(())

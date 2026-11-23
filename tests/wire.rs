@@ -246,3 +246,29 @@ fn measured_frames_preserve_pixels_and_host_counters() -> protocol::Result<()> {
     assert_eq!(measured.frame.bgra, frame.bgra);
     Ok(())
 }
+
+#[test]
+fn graceful_video_finish_is_distinct_from_a_dropped_transport() -> protocol::Result<()> {
+    let mut bytes = Vec::new();
+    protocol::heartbeat(&mut bytes)?;
+    protocol::finish_video(&mut bytes)?;
+    let mut bgra = Cursor::new(&bytes);
+    assert!(Frame::receive(&mut bgra)?.is_none());
+    assert!(
+        matches!(Frame::receive(&mut bgra), Err(error) if error.is::<protocol::VideoFinished>())
+    );
+    let mut h264 = Cursor::new(&bytes);
+    assert!(protocol::receive_h264_access_unit(&mut h264)?.is_none());
+    assert!(
+        protocol::receive_h264_access_unit(&mut h264)
+            .unwrap_err()
+            .is::<protocol::VideoFinished>()
+    );
+    assert!(
+        protocol::receive_h264_access_unit(&mut h264)
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof)
+    );
+    Ok(())
+}

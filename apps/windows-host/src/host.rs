@@ -580,6 +580,9 @@ fn capture(
                 thread::sleep(Duration::from_millis(if rtc.is_some() { 2 } else { 8 }));
             }
         }
+        if (control.is_finished() || stop.load(Ordering::Acquire)) && announced {
+            protocol::finish_video(stream)?;
+        }
         stream.conn.send_close_notify();
         stream.flush()?;
         Ok(())

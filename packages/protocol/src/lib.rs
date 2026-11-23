@@ -232,6 +232,31 @@ fn receive_packet(reader: &mut impl Read, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+const VIDEO_END: &[u8] = b"HSX:END";
+
+#[derive(Debug)]
+pub struct VideoFinished;
+
+impl std::fmt::Display for VideoFinished {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Transmissão encerrada no Windows")
+    }
+}
+
+impl std::error::Error for VideoFinished {}
+
+pub fn finish_video(writer: &mut impl Write) -> Result<()> {
+    send_packet(writer, VIDEO_END, MAX_FRAME)
+}
+
+fn receive_video_packet(reader: &mut impl Read, limit: usize) -> Result<Vec<u8>> {
+    let packet = receive_packet(reader, limit)?;
+    if packet == VIDEO_END {
+        return Err(VideoFinished.into());
+    }
+    Ok(packet)
+}
+
 pub struct Frame {
     pub width: u32,
     pub height: u32,
@@ -303,7 +328,7 @@ impl Frame {
     }
 
     pub fn receive_with_metrics(reader: &mut impl Read) -> Result<Option<ReceivedFrame>> {
-        let data = receive_packet(reader, MAX_FRAME)?;
+        let data = receive_video_packet(reader, MAX_FRAME)?;
         if data.is_empty() {
             return Ok(None);
         }
@@ -387,7 +412,7 @@ pub fn send_h264_access_unit(writer: &mut impl Write, annex_b: &[u8]) -> Result<
 }
 
 pub fn receive_h264_access_unit(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
-    let packet = receive_packet(reader, MAX_H264_ACCESS_UNIT)?;
+    let packet = receive_video_packet(reader, MAX_H264_ACCESS_UNIT)?;
     Ok((!packet.is_empty()).then_some(packet))
 }
 
