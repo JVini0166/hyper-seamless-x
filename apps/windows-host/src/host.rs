@@ -611,9 +611,7 @@ fn capture(
                                 metrics,
                                 h264_metrics.then_some(protocol::HostFrameMetrics {
                                     capture_micros,
-                                    encode_micros: protocol::duration_micros(
-                                        encode_start.elapsed(),
-                                    ),
+                                    encode_micros,
                                     dropped,
                                 }),
                                 &mut last_encoder,
