@@ -2,6 +2,49 @@ use protocol::{DEFAULT_PORT, Endpoint, Result};
 use serde_json::Value;
 use std::time::Duration;
 
+#[cfg(windows)]
+pub struct ManagedNgrok(std::process::Child);
+
+#[cfg(windows)]
+impl ManagedNgrok {
+    pub fn start() -> Result<Self> {
+        use std::{
+            net::{Ipv4Addr, SocketAddr, TcpStream},
+            os::windows::process::CommandExt,
+            process::{Command, Stdio},
+        };
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        let inspection = SocketAddr::from((Ipv4Addr::LOCALHOST, 4040));
+        if TcpStream::connect_timeout(&inspection, Duration::from_millis(150)).is_ok() {
+            return Err("Já há um processo na porta de inspeção do ngrok. Use Copiar link do ngrok se o túnel já estiver configurado.".into());
+        }
+        let path = std::env::var_os("PATH").ok_or("ngrok.exe não encontrado no PATH do Windows")?;
+        let executable = std::env::split_paths(&path)
+            .filter(|path| path.is_absolute())
+            .map(|path| path.join("ngrok.exe"))
+            .find(|path| path.is_file())
+            .ok_or("ngrok.exe não encontrado no PATH do Windows")?;
+        let upstream = format!("http://127.0.0.1:{DEFAULT_PORT}");
+        let process = Command::new(executable)
+            .args(["http", &upstream, "--inspect=false"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        Ok(Self(process))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ManagedNgrok {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 pub fn ngrok_address() -> Result<String> {
     let config = ureq::Agent::config_builder()
         .proxy(None)

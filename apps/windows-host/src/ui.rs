@@ -98,6 +98,7 @@ struct HostPanel {
     sharing: Option<Sharing>,
     status: String,
     tunnel_lookup: Option<Task<()>>,
+    ngrok: Option<crate::tunnel::ManagedNgrok>,
 }
 
 impl HostPanel {
@@ -107,6 +108,7 @@ impl HostPanel {
             sharing: None,
             status: String::new(),
             tunnel_lookup: None,
+            ngrok: None,
         };
         panel.refresh();
         panel
@@ -197,14 +199,42 @@ impl HostPanel {
         cx.notify();
     }
 
-    fn copy_ngrok_address(&mut self, cx: &mut Context<Self>) {
+    fn start_ngrok(&mut self, cx: &mut Context<Self>) {
+        if self.ngrok.is_some() || self.tunnel_lookup.is_some() {
+            return;
+        }
+        match crate::tunnel::ManagedNgrok::start() {
+            Ok(process) => {
+                self.ngrok = Some(process);
+                self.find_ngrok_address(true, cx);
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                cx.notify();
+            }
+        }
+    }
+
+    fn find_ngrok_address(&mut self, starting: bool, cx: &mut Context<Self>) {
         if self.tunnel_lookup.is_some() {
             return;
         }
-        self.status = "Buscando endereço no agente ngrok local…".into();
-        let request = cx
-            .background_executor()
-            .spawn(async { crate::tunnel::ngrok_address() });
+        self.status = if starting {
+            "Iniciando túnel público no ngrok…".into()
+        } else {
+            "Buscando endereço no agente ngrok local…".into()
+        };
+        let request = cx.background_executor().spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(6);
+            loop {
+                match crate::tunnel::ngrok_address() {
+                    Err(_) if starting && std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    result => break result,
+                }
+            }
+        });
         self.tunnel_lookup = Some(cx.spawn(async move |view, cx| {
             let result = request.await;
             let _ = view.update(cx, |view, cx| {
@@ -213,6 +243,12 @@ impl HostPanel {
                     Ok(address) => {
                         cx.write_to_clipboard(ClipboardItem::new_string(address.clone()));
                         view.status = format!("{address} copiado. Cole esse endereço no Mac.");
+                    }
+                    Err(error) if starting => {
+                        view.ngrok = None;
+                        view.status = format!(
+                            "Falha ao iniciar ngrok · {error}. Confira a autenticação do agente."
+                        );
                     }
                     Err(error) => view.status = error.to_string(),
                 }
@@ -353,6 +389,7 @@ impl Render for HostPanel {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .gap_2()
                                 .when(!address.ip().is_loopback(), |bar| {
                                     bar.child(button("copy", "Copiar endereço").on_click(
@@ -367,14 +404,30 @@ impl Render for HostPanel {
                                     bar.child(
                                         button("copy-ngrok", "Copiar link do ngrok").on_click(
                                             cx.listener(|view, _, _, cx| {
-                                                view.copy_ngrok_address(cx)
+                                                view.find_ngrok_address(false, cx)
                                             }),
                                         ),
                                     )
                                 })
+                                .when(address.ip().is_loopback() && self.ngrok.is_none(), |bar| {
+                                    bar.child(button("start-ngrok", "Iniciar túnel público").on_click(
+                                        cx.listener(|view, _, _, cx| view.start_ngrok(cx)),
+                                    ))
+                                })
+                                .when(self.ngrok.is_some(), |bar| {
+                                    bar.child(button("stop-ngrok", "Parar ngrok").on_click(
+                                        cx.listener(|view, _, _, cx| {
+                                            view.tunnel_lookup = None;
+                                            view.ngrok = None;
+                                            view.status = "Túnel ngrok encerrado. O host local continua disponível.".into();
+                                            cx.notify();
+                                        }),
+                                    ))
+                                })
                                 .child(button("stop", "Parar compartilhamento").on_click(
                                     cx.listener(|this, _, _, cx| {
                                         this.tunnel_lookup = None;
+                                        this.ngrok = None;
                                         this.sharing = None;
                                         this.refresh();
                                         cx.notify();

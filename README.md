@@ -21,7 +21,7 @@ O launcher do Mac mostra atalhos para o Explorador, o Bloco de Notas e o VS Code
 - Endereço TCP, como `tcp://0.tcp.ngrok.io:12345`.
 - Link HTTP ou HTTPS de um túnel que aceite WebSocket, como `https://exemplo.ngrok.app`.
 
-Para um túnel, selecione **Usar túnel local** no host Windows. Configure o túnel no mesmo Windows para encaminhar para `127.0.0.1:47651`. Cole no Mac o endereço público exibido pelo serviço. Se o agente ngrok já estiver rodando no Windows com o endereço de inspeção padrão, clique em **Copiar link do ngrok** para copiar o link do endpoint correspondente. O cliente usa WebSocket para URLs HTTP/HTTPS e preserva o TLS entre os aplicativos dentro da conexão do túnel.
+Para um túnel, selecione **Usar túnel local** no host Windows. Se o ngrok já estiver instalado, autenticado e no PATH do Windows, clique em **Iniciar túnel público**. O host abre um endpoint HTTP, copia o link e encerra o agente que iniciou ao parar o compartilhamento. Para usar um agente externo, configure o túnel no mesmo Windows para encaminhar para `127.0.0.1:47651`. Cole no Mac o endereço público exibido pelo serviço. Se o agente ngrok já estiver rodando no Windows com o endereço de inspeção padrão, clique em **Copiar link do ngrok** para copiar o link do endpoint correspondente. O cliente usa WebSocket para URLs HTTP/HTTPS e preserva o TLS entre os aplicativos dentro da conexão do túnel.
 
 O túnel é opcional. O uso direto na LAN dispensa serviços externos. Consulte a documentação do ngrok para [endpoints HTTP](https://ngrok.com/docs/gateway/endpoints/http) e [endpoints TCP](https://ngrok.com/docs/gateway/endpoints/tcp). O ngrok pode aplicar limites do plano e exigir um método de pagamento para habilitar endpoints TCP no plano gratuito.
 
