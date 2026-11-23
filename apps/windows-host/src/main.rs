@@ -5,6 +5,8 @@ mod h264;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
+mod nvenc;
+#[cfg(windows)]
 mod ui;
 
 #[cfg(windows)]

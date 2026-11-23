@@ -13,6 +13,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 if-addrs = "0.15"
 mdns-sd = "0.22"
+mini-nvcodec = "=0.1.0"
+libloading = "0.8"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
 
 [build-dependencies]
 cc = "1"

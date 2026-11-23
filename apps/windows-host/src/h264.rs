@@ -14,14 +14,14 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-pub struct Encoder {
+struct MediaFoundationEncoder {
     handle: NonNull<c_void>,
     width: u32,
     height: u32,
     first: bool,
 }
 
-impl Encoder {
+impl MediaFoundationEncoder {
     pub fn new(width: u32, height: u32) -> Result<Self> {
         if width == 0
             || height == 0
@@ -104,8 +104,67 @@ impl Encoder {
     }
 }
 
-impl Drop for Encoder {
+impl Drop for MediaFoundationEncoder {
     fn drop(&mut self) {
         unsafe { hsx_encoder_destroy(self.handle.as_ptr()) };
     }
+}
+
+enum Backend {
+    Nvidia(Box<crate::nvenc::Encoder>),
+    MediaFoundation(MediaFoundationEncoder),
+}
+
+pub struct Encoder {
+    width: u32,
+    height: u32,
+    backend: Backend,
+    first: bool,
+}
+
+impl Encoder {
+    pub fn new(width: u32, height: u32) -> Result<Self> {
+        let backend = match crate::nvenc::Encoder::new(width, height) {
+            Ok(nvidia) => Backend::Nvidia(Box::new(nvidia)),
+            Err(_) => Backend::MediaFoundation(MediaFoundationEncoder::new(width, height)?),
+        };
+        Ok(Self {
+            width,
+            height,
+            backend,
+            first: true,
+        })
+    }
+
+    pub fn matches(&self, frame: &Frame) -> bool {
+        (self.width, self.height) == (frame.width, frame.height)
+    }
+
+    pub fn encode(&mut self, frame: &Frame) -> Result<Vec<u8>> {
+        match &mut self.backend {
+            Backend::Nvidia(encoder) => {
+                if let Ok(unit) = encoder.encode(frame)
+                    && (!self.first || ready_to_decode(&unit))
+                {
+                    self.first = false;
+                    return Ok(unit);
+                }
+                self.backend =
+                    Backend::MediaFoundation(MediaFoundationEncoder::new(self.width, self.height)?);
+            }
+            Backend::MediaFoundation(encoder) => return encoder.encode(frame),
+        }
+        match &mut self.backend {
+            Backend::MediaFoundation(encoder) => encoder.encode(frame),
+            Backend::Nvidia(_) => unreachable!(),
+        }
+    }
+}
+
+fn ready_to_decode(unit: &[u8]) -> bool {
+    (unit.starts_with(&[0, 0, 1]) || unit.starts_with(&[0, 0, 0, 1]))
+        && [5, 7, 8].into_iter().all(|kind| {
+            unit.windows(4)
+                .any(|bytes| bytes[..3] == [0, 0, 1] && bytes[3] & 0x1f == kind)
+        })
 }
