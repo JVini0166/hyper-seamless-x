@@ -168,3 +168,33 @@ pub(crate) fn ready_to_decode(unit: &[u8]) -> bool {
                 .any(|bytes| bytes[..3] == [0, 0, 1] && bytes[3] & 0x1f == kind)
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the Windows Media Foundation H.264 encoder"]
+    fn media_foundation_encodes_idr_and_predictive_frames() -> Result<()> {
+        let (width, height) = (640, 480);
+        let mut encoder = MediaFoundationEncoder::new(width, height)?;
+        let mut frame = Frame {
+            width,
+            height,
+            bgra: [0, 0, 255, 255].repeat(width as usize * height as usize),
+        };
+        let initial = encoder.encode(&frame)?;
+        assert!(
+            ready_to_decode(&initial),
+            "first access unit lacks SPS/PPS or IDR"
+        );
+        frame.bgra[..4096].fill(255);
+        let next = encoder.encode(&frame)?;
+        assert!(
+            next.windows(4)
+                .any(|bytes| bytes[..3] == [0, 0, 1] && matches!(bytes[3] & 0x1f, 1 | 5)),
+            "second access unit lacks a picture"
+        );
+        Ok(())
+    }
+}

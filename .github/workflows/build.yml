@@ -10,6 +10,17 @@ jobs:
       - run: rustup update stable
       - run: cargo test --locked -p protocol
       - run: cargo build --locked -p windows-host --release
+      - name: Exercise Media Foundation H.264
+        shell: pwsh
+        run: |
+          $system = Join-Path $env:windir 'System32'
+          if ((Test-Path (Join-Path $system 'mfplat.dll')) -and
+              (Test-Path (Join-Path $system 'msmpeg2venc.dll'))) {
+            cargo test --locked -p windows-host --release media_foundation_encodes_idr_and_predictive_frames -- --ignored
+            exit $LASTEXITCODE
+          }
+          Write-Warning 'Media Foundation H.264 is unavailable on this runner.'
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-host-x64

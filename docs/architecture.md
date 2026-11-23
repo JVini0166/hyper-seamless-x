@@ -22,6 +22,8 @@ Mensagens JSON têm um prefixo de tamanho de 32 bits em ordem de rede. Após a c
 
 O cliente oferece suporte a H.264 na solicitação de vídeo. Quando um host responde com `StreamingH264`, envia uma unidade de acesso Annex B por pacote. O início da sessão deve incluir SPS e PPS e um quadro IDR. A configuração de baixa latência deve dispensar reordenação de quadros. O cliente converte os NALs para AVCC, usa VideoToolbox com aceleração permitida e entrega BGRA à janela GPUI. A capacidade efetiva de hardware depende da configuração e do sistema. O host tenta codificar H.264 via NVENC em um adaptador NVIDIA. Quando a captura já usa o adaptador NVIDIA, o quadro passa de uma textura Direct3D 11 à outra na GPU, sem leitura pela CPU. Quando a captura usa outro adaptador, o host lê o BGRA e carrega o quadro em uma textura da NVIDIA. Se NVENC estiver indisponível, o host tenta o encoder síncrono do Media Foundation com entrada NV12 convertida em CPU. Quando a configuração ou codificação falha, o host usa BGRA com Zstandard. Uma sessão H.264 em andamento sinaliza essa mudança uma vez, com o pacote reservado `HSX:BGRA`, antes do primeiro quadro de fallback.
 
+Em um Windows com Media Foundation, execute `cargo test --locked -p windows-host --release media_foundation_encodes_idr_and_predictive_frames -- --ignored` para testar o encoder nativo com quadros sintéticos. O teste verifica que o primeiro quadro contém SPS, PPS e IDR, e que o encoder continua emitindo imagens. O GitHub Actions executa essa verificação quando o runner tem os componentes da plataforma.
+
 ## Validação em dois computadores
 
 1. Rode `cargo test --locked -p protocol`.
