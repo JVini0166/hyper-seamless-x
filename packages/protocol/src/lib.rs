@@ -99,6 +99,8 @@ pub enum Request {
     View {
         handle: u64,
         process_id: u32,
+        #[serde(default)]
+        metrics: bool,
     },
     Launch(LaunchApp),
     Input {
@@ -228,35 +230,100 @@ fn pixel_bytes(width: u32, height: u32) -> Result<usize> {
     Ok(pixels as usize * 4)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct HostFrameMetrics {
+    pub capture_micros: u32,
+    pub encode_micros: u32,
+    pub dropped: u32,
+}
+
+pub struct ReceivedFrame {
+    pub frame: Frame,
+    pub host_metrics: Option<HostFrameMetrics>,
+    pub compressed_bytes: usize,
+    pub decode_micros: u32,
+}
+
+const MEASURED_FLAG: u32 = 1 << 31;
+
+pub fn duration_micros(duration: std::time::Duration) -> u32 {
+    duration.as_micros().min(u32::MAX.into()) as u32
+}
+
 impl Frame {
     pub fn send(&self, writer: &mut impl Write) -> Result<()> {
+        self.send_with_metrics(writer, None)
+    }
+
+    pub fn send_with_metrics(
+        &self,
+        writer: &mut impl Write,
+        capture: Option<(u32, u32)>,
+    ) -> Result<()> {
         if pixel_bytes(self.width, self.height)? != self.bgra.len() {
             return Err("Buffer de vídeo inválido".into());
         }
         let mut data = Vec::new();
-        data.extend_from_slice(&self.width.to_be_bytes());
+        let flags = if capture.is_some() { MEASURED_FLAG } else { 0 };
+        data.extend_from_slice(&(self.width | flags).to_be_bytes());
         data.extend_from_slice(&self.height.to_be_bytes());
-        zstd::stream::copy_encode(self.bgra.as_slice(), &mut data, 1)?;
+        if let Some((capture_micros, dropped)) = capture {
+            data.extend_from_slice(&capture_micros.to_be_bytes());
+            data.extend_from_slice(&0u32.to_be_bytes());
+            data.extend_from_slice(&dropped.to_be_bytes());
+            let encode_start = std::time::Instant::now();
+            zstd::stream::copy_encode(self.bgra.as_slice(), &mut data, 1)?;
+            data[12..16].copy_from_slice(&duration_micros(encode_start.elapsed()).to_be_bytes());
+        } else {
+            zstd::stream::copy_encode(self.bgra.as_slice(), &mut data, 1)?;
+        }
         send_packet(writer, &data, MAX_FRAME)
     }
 
     pub fn receive(reader: &mut impl Read) -> Result<Option<Self>> {
+        Ok(Self::receive_with_metrics(reader)?.map(|packet| packet.frame))
+    }
+
+    pub fn receive_with_metrics(reader: &mut impl Read) -> Result<Option<ReceivedFrame>> {
         let data = receive_packet(reader, MAX_FRAME)?;
         if data.is_empty() {
             return Ok(None);
         }
-        let (header, compressed) = data.split_first_chunk::<8>().ok_or("Frame incompleto")?;
-        let width = u32::from_be_bytes(header[..4].try_into()?);
+        let (header, payload) = data.split_first_chunk::<8>().ok_or("Frame incompleto")?;
+        let tagged_width = u32::from_be_bytes(header[..4].try_into()?);
+        let width = tagged_width & !MEASURED_FLAG;
         let height = u32::from_be_bytes(header[4..].try_into()?);
+        let (host_metrics, compressed) = if tagged_width & MEASURED_FLAG != 0 {
+            let (metrics, compressed) = payload
+                .split_first_chunk::<12>()
+                .ok_or("Métricas incompletas")?;
+            (
+                Some(HostFrameMetrics {
+                    capture_micros: u32::from_be_bytes(metrics[..4].try_into()?),
+                    encode_micros: u32::from_be_bytes(metrics[4..8].try_into()?),
+                    dropped: u32::from_be_bytes(metrics[8..].try_into()?),
+                }),
+                compressed,
+            )
+        } else {
+            (None, payload)
+        };
         let size = pixel_bytes(width, height)?;
+        let decode_start = std::time::Instant::now();
         let bgra = zstd::bulk::decompress(compressed, size)?;
+        let decode_micros = duration_micros(decode_start.elapsed());
         if bgra.len() != size {
             return Err("Buffer de vídeo inválido".into());
         }
-        Ok(Some(Self {
-            width,
-            height,
-            bgra,
+        Ok(Some(ReceivedFrame {
+            frame: Self {
+                width,
+                height,
+                bgra,
+            },
+            host_metrics,
+            compressed_bytes: compressed.len(),
+            decode_micros,
         }))
     }
 }

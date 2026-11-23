@@ -27,3 +27,9 @@ Mensagens JSON têm um prefixo de tamanho de 32 bits em ordem de rede. Após a c
 5. Confira o tamanho inicial, a proporção durante o redimensionamento e o aparecimento dos controles do Mac ao encostar na borda superior.
 6. Feche uma transmissão no Mac e confirme que a outra permanece ativa. Clique em **Parar compartilhamento** no host e confira o estado de fim de transmissão no cliente.
 7. Para medir a latência ponta a ponta, coloque os dois monitores no mesmo enquadramento de uma câmera de alta velocidade e compare a transição de um elemento visível no Windows e no Mac. Registre resolução, rede, FPS da câmera e distribuição das medições.
+
+## Diagnóstico de vídeo
+
+Para instrumentar uma sessão de desenvolvimento no Mac, abra o cliente pelo terminal com `HSX_METRICS=1` e selecione uma janela. O cliente registra amostras por janela em stderr quando recebe vídeo. O host envia informações adicionais somente quando a sessão as solicita.
+
+A amostra inclui quadros recebidos por segundo, bitrate do payload comprimido, tempo médio de descompressão Zstandard, tempo médio de compressão e leitura do buffer de captura no Windows e contagem de quadros ignorados ou sobrescritos no host. A leitura do buffer mede o trabalho no callback. Medições de transporte unidirecional, apresentação na tela, latência total e uso de recursos exigem instrumentação adicional.

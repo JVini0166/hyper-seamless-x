@@ -217,3 +217,25 @@ fn server_and_client_compare_code_over_tcp_and_websocket() -> protocol::Result<(
     }
     Ok(())
 }
+
+#[test]
+fn measured_frames_preserve_pixels_and_host_counters() -> protocol::Result<()> {
+    let frame = Frame {
+        width: 4,
+        height: 3,
+        bgra: vec![17; 48],
+    };
+    let mut wire = Vec::new();
+    frame.send(&mut wire)?;
+    frame.send_with_metrics(&mut wire, Some((213, 7)))?;
+    let mut reader = Cursor::new(wire);
+    let plain = Frame::receive_with_metrics(&mut reader)?.expect("missing plain frame");
+    assert!(plain.host_metrics.is_none());
+    let measured = Frame::receive_with_metrics(&mut reader)?.expect("missing measured frame");
+    let host = measured.host_metrics.expect("missing host counters");
+    assert_eq!((host.capture_micros, host.dropped), (213, 7));
+    assert!(measured.compressed_bytes > 0);
+    assert_eq!((measured.frame.width, measured.frame.height), (4, 3));
+    assert_eq!(measured.frame.bgra, frame.bgra);
+    Ok(())
+}

@@ -11,7 +11,7 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -188,8 +188,12 @@ fn handle(
             };
             protocol::send(&mut stream, &response)
         }
-        Request::View { handle, process_id } => match find_window(handle, process_id)? {
-            Some(window) => capture(window, &mut stream, stop),
+        Request::View {
+            handle,
+            process_id,
+            metrics,
+        } => match find_window(handle, process_id)? {
+            Some(window) => capture(window, &mut stream, stop, metrics),
             None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
         },
         Request::Input { handle, process_id } => serve_input(&mut stream, handle, process_id, stop),
@@ -269,7 +273,13 @@ fn control_window(window: Window, action: WindowAction) -> Result<()> {
     Ok(())
 }
 
-type Latest = Arc<Mutex<Option<Frame>>>;
+#[derive(Default)]
+struct CaptureQueue {
+    newest: Mutex<Option<(Frame, u32)>>,
+    dropped: AtomicU32,
+}
+
+type Latest = Arc<CaptureQueue>;
 
 struct Capture {
     latest: Latest,
@@ -294,7 +304,9 @@ impl GraphicsCaptureApiHandler for Capture {
         frame: &mut CaptureFrame,
         _: InternalCaptureControl,
     ) -> Result<()> {
+        let started = Instant::now();
         if self.last.elapsed() < Duration::from_millis(33) {
+            self.latest.dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         let (width, height) = (frame.width(), frame.height());
@@ -305,20 +317,29 @@ impl GraphicsCaptureApiHandler for Capture {
             .buffer()?
             .as_nopadding_buffer(&mut self.scratch)
             .to_vec();
-        *self
+        let elapsed = protocol::duration_micros(started.elapsed());
+        let overwritten = self
             .latest
+            .newest
             .lock()
-            .map_err(|_| "Fila de captura indisponível")? = Some(Frame {
-            width,
-            height,
-            bgra,
-        });
+            .map_err(|_| "Fila de captura indisponível")?
+            .replace((
+                Frame {
+                    width,
+                    height,
+                    bgra,
+                },
+                elapsed,
+            ));
+        if overwritten.is_some() {
+            self.latest.dropped.fetch_add(1, Ordering::Relaxed);
+        }
         self.last = Instant::now();
         Ok(())
     }
 }
 
-fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool) -> Result<()> {
+fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool, metrics: bool) -> Result<()> {
     let latest = Latest::default();
     let settings = Settings::new(
         window,
@@ -339,11 +360,13 @@ fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool) -> Result<()>
         let mut last_write = Instant::now();
         while !control.is_finished() && !stop.load(Ordering::Acquire) {
             let frame = latest
+                .newest
                 .lock()
                 .map_err(|_| "Fila de captura indisponível")?
                 .take();
-            if let Some(frame) = frame {
-                frame.send(stream)?;
+            if let Some((frame, capture_micros)) = frame {
+                let dropped = latest.dropped.swap(0, Ordering::Relaxed);
+                frame.send_with_metrics(stream, metrics.then_some((capture_micros, dropped)))?;
                 last_write = Instant::now();
             } else if last_write.elapsed() >= Duration::from_secs(2) {
                 protocol::heartbeat(stream)?;

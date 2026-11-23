@@ -731,15 +731,22 @@ fn read_video(
     updates: &async_channel::Sender<Update>,
     delivered: &mut bool,
 ) -> Result<()> {
+    let metrics = std::env::var_os("HSX_METRICS").is_some();
+    let mut report = VideoMetrics::default();
     let (response, mut stream) = host.request(Request::View {
         handle: info.handle,
         process_id: info.process_id,
+        metrics,
     })?;
     if !matches!(response, Response::Streaming) {
         return Err("Resposta de captura inesperada".into());
     }
     while !updates.is_closed() {
-        if let Some(frame) = Frame::receive(&mut stream)? {
+        if let Some(packet) = Frame::receive_with_metrics(&mut stream)? {
+            if metrics {
+                report.record(info.handle, &packet);
+            }
+            let frame = packet.frame;
             let mut pixels = frame.bgra;
             for pixel in pixels.chunks_exact_mut(4) {
                 pixel[3] = 255;
@@ -761,6 +768,67 @@ fn read_video(
         }
     }
     Ok(())
+}
+
+struct VideoMetrics {
+    since: Instant,
+    frames: u64,
+    bytes: u64,
+    decode: u64,
+    capture: u64,
+    encode: u64,
+    host_samples: u64,
+    dropped: u64,
+}
+
+impl Default for VideoMetrics {
+    fn default() -> Self {
+        Self {
+            since: Instant::now(),
+            frames: 0,
+            bytes: 0,
+            decode: 0,
+            capture: 0,
+            encode: 0,
+            host_samples: 0,
+            dropped: 0,
+        }
+    }
+}
+
+impl VideoMetrics {
+    fn record(&mut self, window: u64, packet: &protocol::ReceivedFrame) {
+        self.frames += 1;
+        self.bytes += packet.compressed_bytes as u64;
+        self.decode += u64::from(packet.decode_micros);
+        if let Some(host) = packet.host_metrics {
+            self.host_samples += 1;
+            self.capture += u64::from(host.capture_micros);
+            self.encode += u64::from(host.encode_micros);
+            self.dropped += u64::from(host.dropped);
+        }
+        let seconds = self.since.elapsed().as_secs_f64();
+        if seconds < 1. {
+            return;
+        }
+        let host = if self.host_samples > 0 {
+            format!(
+                "readback_us={} encode_us={} host_dropped={}",
+                self.capture / self.host_samples,
+                self.encode / self.host_samples,
+                self.dropped
+            )
+        } else {
+            "host_metrics=unavailable".into()
+        };
+        eprintln!(
+            "video window={window} received_fps={:.1} compressed_kbps={:.0} decode_us={} {host}",
+            self.frames as f64 / seconds,
+            self.bytes as f64 * 0.008 / seconds,
+            self.decode / self.frames
+        );
+        *self = Self::default();
+    }
 }
 
 fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> {
@@ -1255,7 +1323,8 @@ mod tests {
                     hello.request,
                     Request::View {
                         handle: 42,
-                        process_id: 7
+                        process_id: 7,
+                        ..
                     }
                 ));
                 protocol::send(&mut stream, &Response::Streaming)?;
