@@ -1888,7 +1888,22 @@ impl RemoteView {
 }
 
 impl Render for RemoteView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dimensions = self
+            .frame
+            .as_ref()
+            .filter(|_| self.show_diagnostics)
+            .map(|frame| {
+                let viewport = window.viewport_size();
+                let scale = f64::from(window.scale_factor());
+                format!(
+                    "Windows {} × {} px · Área no Mac {:.0} × {:.0} px",
+                    frame.width,
+                    frame.height,
+                    viewport.width.to_f64() * scale,
+                    viewport.height.to_f64() * scale,
+                )
+            });
         div()
             .size_full()
             .relative()
@@ -1944,25 +1959,23 @@ impl Render for RemoteView {
             .when_some(self.frame.clone(), |view, frame| {
                 view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
             })
-            .when_some(
-                self.diagnostics
-                    .clone()
-                    .filter(|_| self.show_diagnostics && self.frame.is_some()),
-                |view, diagnostics| {
-                    view.child(
-                        div()
-                            .absolute()
-                            .top(px(42.))
-                            .left(px(12.))
-                            .bg(rgb(0x172333))
-                            .text_sm()
-                            .rounded_sm()
-                            .px_2()
-                            .py_1()
-                            .child(diagnostics),
-                    )
-                },
-            )
+            .when_some(dimensions, |view, dimensions| {
+                view.child(
+                    div()
+                        .absolute()
+                        .top(px(42.))
+                        .left(px(12.))
+                        .bg(rgb(0x172333))
+                        .text_sm()
+                        .rounded_sm()
+                        .px_2()
+                        .py_1()
+                        .child(div().child(dimensions))
+                        .when_some(self.diagnostics.clone(), |panel, diagnostics| {
+                            panel.child(div().child(diagnostics))
+                        }),
+                )
+            })
             .when(self.frame.is_none(), |view| view.child(self.status.clone()))
             .when_some(
                 self.reconnecting
