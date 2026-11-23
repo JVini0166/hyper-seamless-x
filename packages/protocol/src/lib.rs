@@ -192,6 +192,7 @@ pub enum PointerButton {
 pub enum LaunchApp {
     Explorer,
     Notepad,
+    VsCode,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]

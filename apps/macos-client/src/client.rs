@@ -657,6 +657,7 @@ impl Render for Launcher {
                 view.child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .gap_2()
                         .child(
                             button("refresh", "Atualizar")
@@ -669,6 +670,9 @@ impl Render for Launcher {
                             cx.listener(|this, _, _, cx| {
                                 this.refresh(Some(LaunchApp::Notepad), cx)
                             }),
+                        ))
+                        .child(button("vscode", "Abrir VS Code").on_click(
+                            cx.listener(|this, _, _, cx| this.refresh(Some(LaunchApp::VsCode), cx)),
                         ))
                         .child(
                             button("forget", "Esquecer host")

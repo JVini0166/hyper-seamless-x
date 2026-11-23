@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{self, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc, Mutex,
@@ -177,12 +177,8 @@ fn handle(
             protocol::send(&mut stream, &Response::Windows(windows))
         }
         Request::Launch(app) => {
-            let root = std::env::var_os("SystemRoot").ok_or("SystemRoot indisponível")?;
-            let name = match app {
-                LaunchApp::Explorer => "explorer.exe",
-                LaunchApp::Notepad => "System32/notepad.exe",
-            };
-            let response = match Command::new(Path::new(&root).join(name)).spawn() {
+            let result = launch_path(app).and_then(|path| Ok(Command::new(path).spawn()?));
+            let response = match result {
                 Ok(_) => Response::Launched,
                 Err(error) => Response::Error(error.to_string()),
             };
@@ -228,6 +224,29 @@ fn handle(
             protocol::send(&mut stream, &response)
         }
     }
+}
+
+fn launch_path(app: LaunchApp) -> Result<PathBuf> {
+    if matches!(app, LaunchApp::VsCode) {
+        return [
+            ("LOCALAPPDATA", "Programs/Microsoft VS Code/Code.exe"),
+            ("ProgramFiles", "Microsoft VS Code/Code.exe"),
+            ("ProgramFiles(x86)", "Microsoft VS Code/Code.exe"),
+        ]
+        .into_iter()
+        .filter_map(|(base, path)| {
+            std::env::var_os(base).map(|base| PathBuf::from(base).join(path))
+        })
+        .find(|path| path.is_absolute() && path.is_file())
+        .ok_or_else(|| "VS Code não encontrado nas pastas padrão do Windows".into());
+    }
+    let root = std::env::var_os("SystemRoot").ok_or("SystemRoot indisponível")?;
+    let name = match app {
+        LaunchApp::Explorer => "explorer.exe",
+        LaunchApp::Notepad => "System32/notepad.exe",
+        LaunchApp::VsCode => unreachable!(),
+    };
+    Ok(PathBuf::from(root).join(name))
 }
 
 fn serve_input(
