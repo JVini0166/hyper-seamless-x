@@ -23,10 +23,10 @@ chmod 600 ~/Downloads/pairing.json
 ./scripts/run-macos.sh 192.168.1.20:47651 ~/Downloads/pairing.json
 ```
 
-Clique numa janela para visualizar a transmissão. O launcher abre o Explorador ou o Bloco de Notas e oferece atualização manual da lista. Cada janela do Mac pode ser movida, redimensionada ou fechada independentemente.
+Clique numa janela para visualizar a transmissão. O launcher abre o Explorador ou o Bloco de Notas e oferece atualização manual da lista. Cada janela do Mac pode ser movida, redimensionada ou fechada independentemente. A barra da transmissão permite restaurar, minimizar, maximizar e fechar a janela no Windows.
 
 ## Estado
 
-Esta versão implementa descoberta manual de janelas, abertura de dois aplicativos, pareamento por arquivo, TLS e visualização de múltiplas janelas. O fluxo de vídeo experimental usa BGRA com Zstandard por TCP e captura limitada a cerca de 30 quadros por segundo. Use janelas pequenas durante a validação em Wi-Fi. Ainda faltam mouse e teclado remotos, sincronização do estado das janelas, descoberta mDNS, reconexão, bandeja do Windows e o pipeline WebRTC/H.264 com codificação e decodificação por hardware. As metas de latência, resolução e FPS ainda exigem medições.
+Esta versão implementa descoberta manual de janelas, abertura de dois aplicativos, pareamento por arquivo, TLS e visualização de múltiplas janelas. O fluxo de vídeo experimental usa BGRA com Zstandard por TCP e captura limitada a cerca de 30 quadros por segundo. Use janelas pequenas durante a validação em Wi-Fi. Ainda faltam mouse e teclado remotos, sincronização automática do estado das janelas, descoberta mDNS, reconexão, bandeja do Windows e o pipeline WebRTC/H.264 com codificação e decodificação por hardware. As metas de latência, resolução e FPS ainda exigem medições.
 
 [Arquitetura e procedimento de validação](docs/architecture.md).

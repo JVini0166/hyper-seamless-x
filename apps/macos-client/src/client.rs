@@ -2,7 +2,9 @@ use gpui::{
     App, Application, Bounds, Context, ObjectFit, Render, RenderImage, SharedString, Task,
     TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, prelude::*, px, rgb, size,
 };
-use protocol::{Frame, Hello, LaunchApp, Pairing, Request, Response, Result, WindowInfo};
+use protocol::{
+    Frame, Hello, LaunchApp, Pairing, Request, Response, Result, WindowAction, WindowInfo,
+};
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use std::{
     fs,
@@ -244,6 +246,10 @@ struct RemoteView {
     frame: Option<Arc<RenderImage>>,
     status: SharedString,
     _task: Task<()>,
+    host: Host,
+    info: WindowInfo,
+    action: Option<Task<()>>,
+    action_error: Option<String>,
 }
 
 enum Update {
@@ -279,8 +285,9 @@ fn read_video(host: Host, info: WindowInfo, updates: &async_channel::Sender<Upda
 impl RemoteView {
     fn connect(host: Host, info: WindowInfo, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (sender, receiver) = async_channel::bounded(1);
+        let (video_host, video_info) = (host.clone(), info.clone());
         thread::spawn(move || {
-            if let Err(error) = read_video(host, info, &sender) {
+            if let Err(error) = read_video(video_host, video_info, &sender) {
                 let _ =
                     sender.force_send(Update::Closed(format!("Transmissão encerrada · {error}")));
             }
@@ -308,22 +315,88 @@ impl RemoteView {
             frame: None,
             status: "Aguardando imagem do Windows…".into(),
             _task: task,
+            host,
+            info,
+            action: None,
+            action_error: None,
         }
     }
 }
 
+impl RemoteView {
+    fn control(&mut self, action: WindowAction, cx: &mut Context<Self>) {
+        if self.action.is_some() {
+            return;
+        }
+        let host = self.host.clone();
+        let request = Request::Control {
+            handle: self.info.handle,
+            process_id: self.info.process_id,
+            action,
+        };
+        let operation = cx.background_executor().spawn(async move {
+            match host.request(request)?.0 {
+                Response::Controlled => Ok(()),
+                _ => Err("Resposta de controle inesperada".into()),
+            }
+        });
+        self.action = Some(cx.spawn(async move |view, cx| {
+            let result: Result<()> = operation.await;
+            let _ = view.update(cx, |view, cx| {
+                view.action = None;
+                view.action_error = result.err().map(|error| error.to_string());
+                cx.notify();
+            });
+        }));
+    }
+}
+
 impl Render for RemoteView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let actions = [
+            ("restore", "Restaurar", WindowAction::Restore),
+            ("minimize", "Minimizar", WindowAction::Minimize),
+            ("maximize", "Maximizar", WindowAction::Maximize),
+            ("close", "Fechar no Windows", WindowAction::Close),
+        ];
         div()
             .size_full()
             .flex()
-            .items_center()
-            .justify_center()
+            .flex_col()
             .bg(rgb(0x101722))
             .text_color(rgb(0xe8edf5))
-            .when_some(self.frame.clone(), |view, frame| {
-                view.child(img(frame).size_full().object_fit(ObjectFit::Contain))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .p_2()
+                    .text_sm()
+                    .children(actions.into_iter().map(|(id, label, action)| {
+                        button(id, label)
+                            .on_click(cx.listener(move |view, _, _, cx| view.control(action, cx)))
+                    })),
+            )
+            .when_some(self.action_error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .px_3()
+                        .text_sm()
+                        .text_color(rgb(0xffae9c))
+                        .child(error),
+                )
             })
-            .when(self.frame.is_none(), |view| view.child(self.status.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when_some(self.frame.clone(), |view, frame| {
+                        view.child(img(frame).size_full().object_fit(ObjectFit::Contain))
+                    })
+                    .when(self.frame.is_none(), |view| view.child(self.status.clone())),
+            )
     }
 }

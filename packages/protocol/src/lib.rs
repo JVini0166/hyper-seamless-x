@@ -81,8 +81,16 @@ impl Hello {
 #[derive(Serialize, Deserialize)]
 pub enum Request {
     List,
-    View { handle: u64, process_id: u32 },
+    View {
+        handle: u64,
+        process_id: u32,
+    },
     Launch(LaunchApp),
+    Control {
+        handle: u64,
+        process_id: u32,
+        action: WindowAction,
+    },
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -91,11 +99,20 @@ pub enum LaunchApp {
     Notepad,
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub enum WindowAction {
+    Restore,
+    Maximize,
+    Minimize,
+    Close,
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Response {
     Windows(Vec<WindowInfo>),
     Streaming,
     Launched,
+    Controlled,
     Error(String),
 }
 

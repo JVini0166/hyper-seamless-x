@@ -6531,6 +6531,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "windows-capture 2.0.1",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

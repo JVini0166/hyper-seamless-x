@@ -1,4 +1,6 @@
-use protocol::{Frame, Hello, LaunchApp, Pairing, Request, Response, Result, WindowInfo};
+use protocol::{
+    Frame, Hello, LaunchApp, Pairing, Request, Response, Result, WindowAction, WindowInfo,
+};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use std::{
     fs,
@@ -116,17 +118,51 @@ fn handle(socket: TcpStream, config: Arc<ServerConfig>, pairing: &Pairing) -> Re
             };
             protocol::send(&mut stream, &response)
         }
-        Request::View { handle, process_id } => {
-            let window = Window::enumerate()?.into_iter().find(|window| {
-                window.as_raw_hwnd() as u64 == handle
-                    && window.process_id().ok() == Some(process_id)
-            });
-            match window {
-                Some(window) => capture(window, &mut stream),
-                None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
-            }
+        Request::View { handle, process_id } => match find_window(handle, process_id)? {
+            Some(window) => capture(window, &mut stream),
+            None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
+        },
+        Request::Control {
+            handle,
+            process_id,
+            action,
+        } => {
+            let response = match find_window(handle, process_id)? {
+                Some(window) => match control_window(window, action) {
+                    Ok(()) => Response::Controlled,
+                    Err(error) => Response::Error(error.to_string()),
+                },
+                None => Response::Error("Janela indisponível".into()),
+            };
+            protocol::send(&mut stream, &response)
         }
     }
+}
+
+fn find_window(handle: u64, process_id: u32) -> Result<Option<Window>> {
+    Ok(Window::enumerate()?.into_iter().find(|window| {
+        window.as_raw_hwnd() as u64 == handle && window.process_id().ok() == Some(process_id)
+    }))
+}
+
+fn control_window(window: Window, action: WindowAction) -> Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        PostMessageW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, ShowWindowAsync, WM_CLOSE,
+    };
+    let hwnd = window.as_raw_hwnd();
+    // Windows owns the handle. The caller verifies it against the current window list.
+    let ok = unsafe {
+        match action {
+            WindowAction::Restore => ShowWindowAsync(hwnd, SW_RESTORE),
+            WindowAction::Maximize => ShowWindowAsync(hwnd, SW_MAXIMIZE),
+            WindowAction::Minimize => ShowWindowAsync(hwnd, SW_MINIMIZE),
+            WindowAction::Close => PostMessageW(hwnd, WM_CLOSE, 0, 0),
+        }
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 type Latest = Arc<Mutex<Option<Frame>>>;
