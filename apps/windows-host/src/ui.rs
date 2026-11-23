@@ -1,13 +1,14 @@
 use crate::host;
 use gpui::{
-    App, Application, Bounds, Context, Render, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, ClipboardItem, Context, Render, Task, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
-use protocol::{ConnectionProfile, DEFAULT_PORT};
+use protocol::{DEFAULT_PORT, PairingState};
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
+    time::Duration,
 };
 
 pub fn run() {
@@ -22,7 +23,7 @@ pub fn run() {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
-                size(px(620.), px(475.)),
+                size(px(680.), px(510.)),
                 cx,
             ))),
             titlebar: Some(TitlebarOptions {
@@ -36,8 +37,10 @@ pub fn run() {
 }
 
 struct Sharing {
-    _server: host::Server,
-    profile: ConnectionProfile,
+    server: host::Server,
+    address: SocketAddr,
+    state: PairingState,
+    _watch: Task<()>,
 }
 
 struct HostPanel {
@@ -73,75 +76,138 @@ impl HostPanel {
                     .collect();
                 self.addresses.sort();
                 self.addresses.dedup_by_key(|(_, ip)| *ip);
-                self.status = if self.addresses.is_empty() {
-                    "Nenhum endereço IPv4 disponível. Conecte o Windows à rede local.".into()
-                } else {
-                    "Selecione o endereço da rede que o Mac usa para iniciar o compartilhamento."
-                        .into()
-                };
+                self.status =
+                    "Escolha a rede local ou use um túnel que aponta para este PC.".into();
             }
             Err(error) => self.status = format!("Falha ao listar interfaces · {error}"),
         }
     }
 
-    fn start(&mut self, ip: Ipv4Addr) {
+    fn start(&mut self, ip: Ipv4Addr, cx: &mut Context<Self>) {
+        let address = SocketAddr::from((ip, DEFAULT_PORT));
         let result = (|| -> protocol::Result<_> {
             let directory = data_dir()?;
             fs::create_dir_all(&directory)?;
-            let address = SocketAddr::from((ip, DEFAULT_PORT));
-            let (server, pairing) = host::start(address, &directory)?;
-            Ok(Sharing {
-                _server: server,
-                profile: ConnectionProfile { address, pairing },
-            })
+            host::start(address, &directory)
         })();
         match result {
-            Ok(sharing) => {
-                self.status = format!("Compartilhando em {}", sharing.profile.address);
-                self.sharing = Some(sharing);
+            Ok(server) => {
+                self.status = if ip.is_loopback() {
+                    format!(
+                        "Túnel local ativo em {address}. Use o endereço público do túnel no Mac."
+                    )
+                } else {
+                    format!("Compartilhando em {address}")
+                };
+                self.sharing = Some(Sharing {
+                    server,
+                    address,
+                    state: PairingState::Closed,
+                    _watch: cx.spawn(async move |view, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(200))
+                                .await;
+                            let updated = view.update(cx, |this, cx| {
+                                let Some(sharing) = &mut this.sharing else {
+                                    return false;
+                                };
+                                let state = sharing.server.pairing_gate.state();
+                                if sharing.state != state {
+                                    sharing.state = state;
+                                    cx.notify();
+                                }
+                                true
+                            });
+                            if !updated.unwrap_or(false) {
+                                break;
+                            }
+                        }
+                    }),
+                });
             }
             Err(error) => self.status = format!("Falha ao iniciar · {error}"),
         }
+        cx.notify();
     }
 
-    fn export(&self, cx: &mut Context<Self>) {
+    fn pairing_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(sharing) = &self.sharing else {
-            return;
+            return div();
         };
-        let profile = sharing.profile.clone();
-        let directory = std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        let picker = cx.prompt_for_new_path(&directory, Some("hyper-seamless-x-pairing.json"));
-        cx.spawn(async move |view, cx| {
-            let picker_result = picker.await;
-            let result = (|| -> protocol::Result<_> {
-                let Some(path) = picker_result?? else {
-                    return Ok(None);
-                };
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)?;
-                if let Err(error) = serde_json::to_writer(&mut file, &profile) {
-                    drop(file);
-                    let _ = fs::remove_file(&path);
-                    return Err(error.into());
-                }
-                Ok(Some(path))
-            })();
-            let _ = view.update(cx, |view, cx| {
-                match result {
-                    Ok(Some(path)) => {
-                        view.status = format!("Pareamento salvo em {}", path.display())
+        match &sharing.state {
+            PairingState::Closed => div().child(button("pair", "Autorizar novo Mac").on_click(
+                cx.listener(|this, _, _, cx| {
+                    if let Some(sharing) = &mut this.sharing {
+                        match sharing.server.pairing_gate.open() {
+                            Ok(()) => sharing.state = sharing.server.pairing_gate.state(),
+                            Err(error) => this.status = error.to_string(),
+                        }
+                        cx.notify();
                     }
-                    Ok(None) => {}
-                    Err(error) => view.status = format!("Falha ao salvar · {error}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+                }),
+            )),
+            PairingState::Open => div()
+                .text_sm()
+                .child("Digite o endereço no Mac. O pareamento fica aberto por 90 segundos.")
+                .child(
+                    div()
+                        .mt_2()
+                        .child(
+                            button("cancel", "Cancelar pareamento").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(sharing) = &mut this.sharing {
+                                        sharing.server.pairing_gate.close();
+                                        sharing.state = PairingState::Closed;
+                                        cx.notify();
+                                    }
+                                },
+                            )),
+                        ),
+                ),
+            PairingState::Pending(code) => {
+                let accepted = code.clone();
+                let rejected = code.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .child("Confira se este código aparece no Mac antes de aprovar."),
+                    )
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(code.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(button("accept", "Aprovar Mac").on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.decide(&accepted, true, cx);
+                                },
+                            )))
+                            .child(button("reject", "Recusar").on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.decide(&rejected, false, cx);
+                                },
+                            ))),
+                    )
+            }
+        }
+    }
+
+    fn decide(&mut self, code: &str, accepted: bool, cx: &mut Context<Self>) {
+        if let Some(sharing) = &mut self.sharing {
+            sharing.server.pairing_gate.decide(code, accepted);
+            sharing.state = sharing.server.pairing_gate.state();
+            cx.notify();
+        }
     }
 }
 
@@ -189,41 +255,51 @@ impl Render for HostPanel {
                     .text_color(rgb(0xa5b5c9))
                     .child(self.status.clone()),
             )
-            .when(self.sharing.is_some(), |panel| {
+            .when_some(
+                self.sharing.as_ref().map(|sharing| sharing.address),
+                |panel, address| {
+                    panel
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .when(!address.ip().is_loopback(), |bar| {
+                                    bar.child(button("copy", "Copiar endereço").on_click(
+                                        cx.listener(move |_, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                address.to_string(),
+                                            ));
+                                        }),
+                                    ))
+                                })
+                                .child(button("stop", "Parar compartilhamento").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.sharing = None;
+                                        this.refresh();
+                                        cx.notify();
+                                    }),
+                                )),
+                        )
+                        .child(self.pairing_controls(cx))
+                },
+            )
+            .when(self.sharing.is_none(), |panel| {
                 panel
                     .child(
                         div()
                             .flex()
                             .gap_2()
-                            .child(
-                                button("export", "Exportar pareamento")
-                                    .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
-                            )
-                            .child(
-                                button("stop", "Parar compartilhamento").on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.sharing = None;
-                                        this.refresh();
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    )
-                    .child(
-                        div().text_sm().text_color(rgb(0xa5b5c9)).child(
-                            "Transfira o arquivo de pareamento ao Mac por um canal privado.",
-                        ),
-                    )
-            })
-            .when(self.sharing.is_none(), |panel| {
-                panel
-                    .child(
-                        div().child(button("refresh", "Atualizar rede").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.refresh();
-                                cx.notify();
-                            },
-                        ))),
+                            .child(button("tunnel", "Usar túnel local").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.start(Ipv4Addr::LOCALHOST, cx);
+                                },
+                            )))
+                            .child(button("refresh", "Atualizar rede").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.refresh();
+                                    cx.notify();
+                                },
+                            ))),
                     )
                     .child(
                         div()
@@ -238,10 +314,7 @@ impl Render for HostPanel {
                                 |(index, (name, ip))| {
                                     let ip = *ip;
                                     button(("listen", index), format!("{name} · {ip}")).on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.start(ip);
-                                            cx.notify();
-                                        }),
+                                        cx.listener(move |this, _, _, cx| this.start(ip, cx)),
                                     )
                                 },
                             )),

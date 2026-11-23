@@ -1,5 +1,6 @@
 use protocol::{
-    Frame, Hello, LaunchApp, Pairing, Request, Response, Result, WindowAction, WindowInfo,
+    Frame, Hello, LaunchApp, Pairing, PairingGate, Request, Response, Result, VERSION,
+    WindowAction, WindowInfo, Wire,
 };
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use std::{
@@ -23,9 +24,10 @@ use windows_capture::{
     window::Window,
 };
 
-type Stream = StreamOwned<ServerConnection, TcpStream>;
+type Stream = StreamOwned<ServerConnection, Wire>;
 
 pub struct Server {
+    pub pairing_gate: PairingGate,
     stop: Arc<AtomicBool>,
     listener: Option<thread::JoinHandle<()>>,
 }
@@ -33,30 +35,30 @@ pub struct Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        self.pairing_gate.close();
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
         }
     }
 }
 
-pub fn start(addr: SocketAddr, path: &Path) -> Result<(Server, Pairing)> {
+pub fn start(addr: SocketAddr, path: &Path) -> Result<Server> {
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
     let (pairing, key) = load_identity(path)?;
     let config = Arc::new(pairing.server_config(key)?);
     let stop = Arc::new(AtomicBool::new(false));
+    let pairing_gate = PairingGate::default();
     let worker_stop = stop.clone();
-    let worker_pairing = pairing.clone();
+    let gate = pairing_gate.clone();
     let listener = thread::spawn(move || {
-        serve(listener, config, worker_pairing, worker_stop);
+        serve(listener, config, pairing, worker_stop, gate);
     });
-    Ok((
-        Server {
-            stop,
-            listener: Some(listener),
-        },
-        pairing,
-    ))
+    Ok(Server {
+        pairing_gate,
+        stop,
+        listener: Some(listener),
+    })
 }
 
 fn load_identity(path: &Path) -> Result<(Pairing, Vec<u8>)> {
@@ -90,6 +92,7 @@ fn serve(
     config: Arc<ServerConfig>,
     pairing: Pairing,
     stop: Arc<AtomicBool>,
+    gate: PairingGate,
 ) {
     let active = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Acquire) {
@@ -111,8 +114,9 @@ fn serve(
             pairing.clone(),
             stop.clone(),
         );
+        let gate = gate.clone();
         thread::spawn(move || {
-            let _ = handle(socket, config, &pairing, &stop);
+            let _ = handle(socket, config, &pairing, &stop, &gate);
             active.fetch_sub(1, Ordering::Relaxed);
         });
     }
@@ -123,18 +127,30 @@ fn handle(
     config: Arc<ServerConfig>,
     pairing: &Pairing,
     stop: &AtomicBool,
+    gate: &PairingGate,
 ) -> Result<()> {
-    socket.set_nonblocking(false)?;
-    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-    socket.set_write_timeout(Some(Duration::from_secs(5)))?;
-    socket.set_nodelay(true)?;
-    let mut stream = StreamOwned::new(ServerConnection::new(config)?, socket);
+    let mut stream = StreamOwned::new(
+        ServerConnection::new(config)?,
+        protocol::use_incoming(socket)?,
+    );
     let hello: Hello = protocol::receive(&mut stream)?;
-    hello.verify(pairing)?;
     if stop.load(Ordering::Acquire) {
         return Err("Compartilhamento encerrado".into());
     }
+    if hello.version != VERSION {
+        return protocol::send(
+            &mut stream,
+            &Response::Error("Atualize os dois aplicativos para a mesma versão".into()),
+        );
+    }
+    if matches!(hello.request, Request::Pair) {
+        return protocol::accept_pairing(&mut stream, pairing, gate, || {
+            !stop.load(Ordering::Acquire)
+        });
+    }
+    hello.verify(pairing)?;
     match hello.request {
+        Request::Pair => unreachable!("pairing handled above"),
         Request::List => {
             let mut windows: Vec<_> = Window::enumerate()?
                 .into_iter()

@@ -1,10 +1,16 @@
+mod endpoint;
+mod pairing;
+
+pub use endpoint::{Endpoint, Wire, use_incoming};
+pub use pairing::{PairingGate, PairingState, accept_pairing, request_pairing};
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 pub const DEFAULT_PORT: u16 = 47651;
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const SERVER_NAME: &str = "hyper-seamless-x.local";
 pub const MAX_METADATA: usize = 256 * 1024;
 pub const MAX_PIXELS: usize = 4096 * 2160;
@@ -17,7 +23,7 @@ pub struct Pairing {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectionProfile {
-    pub address: std::net::SocketAddr,
+    pub address: Endpoint,
     pub pairing: Pairing,
 }
 
@@ -87,6 +93,7 @@ impl Hello {
 
 #[derive(Serialize, Deserialize)]
 pub enum Request {
+    Pair,
     List,
     View {
         handle: u64,
@@ -116,6 +123,8 @@ pub enum WindowAction {
 
 #[derive(Serialize, Deserialize)]
 pub enum Response {
+    PairPending,
+    Paired(Pairing),
     Windows(Vec<WindowInfo>),
     Streaming,
     Launched,

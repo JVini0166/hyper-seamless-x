@@ -1,16 +1,20 @@
 use gpui::{
-    App, Application, Bounds, Context, ObjectFit, PathPromptOptions, Render, RenderImage,
-    SharedString, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, prelude::*,
-    px, rgb, size,
+    App, Application, Bounds, Context, Entity, ObjectFit, Render, RenderImage, SharedString,
+    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point,
+    prelude::*, px, rgb, size,
+};
+use gpui_component::{
+    Root, Theme, ThemeMode,
+    input::{Input, InputEvent, InputState},
 };
 use protocol::{
-    ConnectionProfile, Frame, Hello, LaunchApp, Pairing, Request, Response, Result, WindowAction,
-    WindowInfo,
+    ConnectionProfile, Endpoint, Frame, Hello, LaunchApp, Pairing, Request, Response, Result,
+    VERSION, WindowInfo, Wire,
 };
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use std::{
+    collections::HashSet,
     fs,
-    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::Arc,
     thread,
@@ -19,7 +23,7 @@ use std::{
 
 #[derive(Clone)]
 struct Host {
-    addr: SocketAddr,
+    addr: Endpoint,
     pairing: Pairing,
     config: Arc<ClientConfig>,
 }
@@ -33,20 +37,14 @@ impl Host {
         })
     }
 
-    fn request(
-        &self,
-        request: Request,
-    ) -> Result<(Response, StreamOwned<ClientConnection, TcpStream>)> {
-        let socket = TcpStream::connect_timeout(&self.addr, Duration::from_secs(4))?;
-        socket.set_read_timeout(Some(Duration::from_secs(8)))?;
-        socket.set_write_timeout(Some(Duration::from_secs(4)))?;
-        socket.set_nodelay(true)?;
+    fn request(&self, request: Request) -> Result<(Response, StreamOwned<ClientConnection, Wire>)> {
+        let socket = self.addr.connect(Duration::from_secs(8))?;
         let conn = ClientConnection::new(self.config.clone(), protocol::SERVER_NAME.try_into()?)?;
         let mut stream = StreamOwned::new(conn, socket);
         protocol::send(
             &mut stream,
             &Hello {
-                version: protocol::VERSION,
+                version: VERSION,
                 token: self.pairing.token,
                 request,
             },
@@ -72,10 +70,25 @@ impl Host {
     }
 }
 
+enum EnrollmentUpdate {
+    Code(String),
+    Approved(ConnectionProfile),
+    Failed(String),
+}
+
+fn enroll(address: Endpoint, updates: &async_channel::Sender<EnrollmentUpdate>) -> Result<()> {
+    let profile = protocol::request_pairing(address, |code| {
+        updates.send_blocking(EnrollmentUpdate::Code(code))?;
+        Ok(())
+    })?;
+    updates.send_blocking(EnrollmentUpdate::Approved(profile))?;
+    Ok(())
+}
+
 fn profile_path() -> Result<PathBuf> {
     Ok(
         PathBuf::from(std::env::var_os("HOME").ok_or("Pasta pessoal indisponível")?)
-            .join("Library/Application Support/HyperSeamlessX/pairing.json"),
+            .join("Library/Application Support/HyperSeamlessX/paired-host.json"),
     )
 }
 
@@ -107,10 +120,12 @@ pub fn run() -> Result<()> {
         Ok(Some(Host::from_profile(read_profile(&path)?)?))
     }) {
         Ok(Some(host)) => (Some(host), String::new()),
-        Ok(None) => (None, "Importe o pareamento exportado pelo Windows.".into()),
+        Ok(None) => (None, "Digite o IP ou o link do host Windows.".into()),
         Err(error) => (None, format!("Falha ao carregar o pareamento · {error}")),
     };
     Application::new().run(move |cx| {
+        gpui_component::init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -119,18 +134,37 @@ pub fn run() -> Result<()> {
         .detach();
         cx.activate(true);
         let options = window_options(cx, "Hyper Seamless X", 680., 540.);
-        if let Err(error) = cx.open_window(options, |_, cx| {
-            cx.new(|cx| {
+        if let Err(error) = cx.open_window(options, |window, cx| {
+            let existing = host.as_ref().map(|host| host.addr.to_string());
+            let address = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("192.168.1.20 ou https://exemplo.ngrok.app")
+            });
+            if let Some(existing) = existing {
+                address.update(cx, |field, cx| field.set_value(existing, window, cx));
+            }
+            let launcher = cx.new(|cx| {
+                let enter = cx.subscribe(
+                    &address,
+                    |this: &mut Launcher, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::PressEnter { .. }) {
+                            this.connect(cx);
+                        }
+                    },
+                );
                 let mut launcher = Launcher {
                     host,
+                    address,
                     windows: Vec::new(),
+                    opening: HashSet::new(),
                     status,
                     task: None,
-                    importing: false,
+                    enrollment: None,
+                    _enter: enter,
                 };
                 launcher.refresh(None, cx);
                 launcher
-            })
+            });
+            cx.new(|cx| Root::new(launcher, window, cx))
         }) {
             eprintln!("Não foi possível abrir o launcher: {error}");
             cx.quit();
@@ -154,54 +188,180 @@ fn window_options(cx: &App, title: &str, width: f32, height: f32) -> WindowOptio
     }
 }
 
+struct Enrollment {
+    code: Option<String>,
+    confirmed: bool,
+    profile: Option<ConnectionProfile>,
+    _task: Task<()>,
+}
+
 struct Launcher {
     host: Option<Host>,
+    address: Entity<InputState>,
     windows: Vec<WindowInfo>,
+    opening: HashSet<(u64, u32)>,
     status: String,
     task: Option<Task<()>>,
-    importing: bool,
+    enrollment: Option<Enrollment>,
+    _enter: Subscription,
 }
 
 impl Launcher {
-    fn import(&mut self, cx: &mut Context<Self>) {
-        if self.importing {
+    fn connect(&mut self, cx: &mut Context<Self>) {
+        if self.enrollment.is_some() {
             return;
         }
-        self.importing = true;
-        let picker = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Importar pareamento".into()),
+        let addr = match Endpoint::parse(self.address.read(cx).value().as_str()) {
+            Ok(addr) => addr,
+            Err(error) => {
+                self.status = format!("Endereço inválido · {error}");
+                cx.notify();
+                return;
+            }
+        };
+        if self.host.as_ref().is_some_and(|host| host.addr == addr) {
+            self.refresh(None, cx);
+            return;
+        }
+        let (sender, receiver) = async_channel::bounded(2);
+        self.task = None;
+        self.windows.clear();
+        self.status = format!("Solicitando pareamento a {addr}…");
+        thread::spawn(move || {
+            if let Err(error) = enroll(addr, &sender) {
+                let _ = sender.send_blocking(EnrollmentUpdate::Failed(error.to_string()));
+            }
         });
-        cx.spawn(async move |view, cx| {
-            let selected = picker.await;
-            let result = (|| -> Result<_> {
-                let Some(paths) = selected?? else {
-                    return Ok(None);
-                };
-                let path = paths.first().ok_or("Nenhum arquivo selecionado")?;
-                let profile = read_profile(path)?;
-                let host = Host::from_profile(profile.clone())?;
-                save_profile(&profile)?;
-                Ok(Some(host))
-            })();
-            let _ = view.update(cx, |view, cx| {
-                view.importing = false;
-                match result {
-                    Ok(Some(host)) => {
-                        view.task = None;
-                        view.windows.clear();
-                        view.host = Some(host);
-                        view.refresh(None, cx);
+        let task = cx.spawn(async move |view, cx| {
+            while let Ok(update) = receiver.recv().await {
+                let keep = view.update(cx, |view, cx| view.enrollment_update(update, cx));
+                if !keep.unwrap_or(false) {
+                    break;
+                }
+            }
+        });
+        self.enrollment = Some(Enrollment {
+            code: None,
+            confirmed: false,
+            profile: None,
+            _task: task,
+        });
+        cx.notify();
+    }
+
+    fn enrollment_update(&mut self, update: EnrollmentUpdate, cx: &mut Context<Self>) -> bool {
+        let Some(enrollment) = &mut self.enrollment else {
+            return false;
+        };
+        match update {
+            EnrollmentUpdate::Code(code) => {
+                enrollment.code = Some(code);
+                self.status = "Compare o código com o exibido no Windows.".into();
+            }
+            EnrollmentUpdate::Approved(profile) => {
+                enrollment.profile = Some(profile);
+                if !enrollment.confirmed {
+                    self.status =
+                        "O Windows aprovou. Confirme que os dois códigos conferem.".into();
+                }
+                self.finish_enrollment(cx);
+            }
+            EnrollmentUpdate::Failed(error) => {
+                self.status = format!("Falha no pareamento · {error}");
+                self.enrollment = None;
+            }
+        }
+        cx.notify();
+        self.enrollment.is_some()
+    }
+
+    fn finish_enrollment(&mut self, cx: &mut Context<Self>) {
+        let Some(enrollment) = &mut self.enrollment else {
+            return;
+        };
+        if !enrollment.confirmed {
+            return;
+        }
+        let Some(profile) = enrollment.profile.take() else {
+            self.status = "Aguardando aprovação no Windows…".into();
+            cx.notify();
+            return;
+        };
+        self.enrollment = None;
+        match Host::from_profile(profile.clone()).and_then(|host| {
+            save_profile(&profile)?;
+            Ok(host)
+        }) {
+            Ok(host) => {
+                self.task = None;
+                self.host = Some(host);
+                self.refresh(None, cx);
+            }
+            Err(error) => self.status = format!("Falha ao salvar o pareamento · {error}"),
+        }
+        cx.notify();
+    }
+
+    fn forget_host(&mut self, cx: &mut Context<Self>) {
+        let result = profile_path().and_then(|path| match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        });
+        match result {
+            Ok(()) => {
+                self.task = None;
+                self.host = None;
+                self.windows.clear();
+                self.status = "Autorize um novo pareamento no Windows e conecte novamente.".into();
+            }
+            Err(error) => self.status = format!("Falha ao esquecer endereço · {error}"),
+        }
+        cx.notify();
+    }
+
+    fn open_remote(&mut self, info: WindowInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        let key = (info.handle, info.process_id);
+        if !self.opening.insert(key) {
+            return;
+        }
+        let title = info.title.clone();
+        let frames = start_video(host, info);
+        self.status = format!("Abrindo {title}…");
+        cx.spawn_in(window, async move |view, cx| {
+            let timeout = cx.background_executor().timer(Duration::from_secs(15));
+            let first = futures_lite::future::race(async { frames.recv().await.ok() }, async {
+                timeout.await;
+                None
+            })
+            .await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.opening.remove(&key);
+                match first {
+                    Some(Update::Image(frame)) => {
+                        let options = remote_options(window, &title, &frame, cx);
+                        match cx.open_window(options, |window, cx| {
+                            cx.new(|cx| RemoteView::new(frame, frames, window, cx))
+                        }) {
+                            Ok(_) => view.status = format!("{title} aberto"),
+                            Err(error) => view.status = error.to_string(),
+                        }
                     }
-                    Ok(None) => {}
-                    Err(error) => view.status = format!("Falha ao importar · {error}"),
+                    Some(Update::Closed(error)) => view.status = error,
+                    None => {
+                        view.status = format!(
+                            "Sem imagem de {title}. Confira se a janela está aberta no Windows."
+                        )
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
+        cx.notify();
     }
 
     fn refresh(&mut self, launch: Option<LaunchApp>, cx: &mut Context<Self>) {
@@ -221,10 +381,10 @@ impl Launcher {
                 this.task = None;
                 match result {
                     Ok(windows) => {
-                        this.status = if windows.is_empty() {
-                            "Nenhuma janela capturável encontrada".into()
-                        } else {
-                            format!("{} janelas disponíveis", windows.len())
+                        this.status = match windows.len() {
+                            0 => "Nenhuma janela capturável encontrada".into(),
+                            1 => "1 janela disponível".into(),
+                            count => format!("{count} janelas disponíveis"),
                         };
                         this.windows = windows;
                     }
@@ -278,25 +438,77 @@ impl Render for Launcher {
                 div()
                     .flex()
                     .gap_2()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.address)))
                     .child(
-                        button("import", "Importar pareamento")
-                            .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
-                    )
-                    .when(self.host.is_some(), |bar| {
-                        bar.child(
+                        button("connect", "Conectar")
+                            .on_click(cx.listener(|view, _, _, cx| view.connect(cx))),
+                    ),
+            )
+            .when_some(self.enrollment.as_ref(), |view, enrollment| {
+                view.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgb(0x1a2432))
+                        .when_some(enrollment.code.clone(), |panel, code| {
+                            panel.child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(code),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .when(enrollment.code.is_some() && !enrollment.confirmed, |bar| {
+                                    bar.child(button("confirm", "Os códigos conferem").on_click(
+                                        cx.listener(|view, _, _, cx| {
+                                            if let Some(enrollment) = &mut view.enrollment {
+                                                enrollment.confirmed = true;
+                                                view.finish_enrollment(cx);
+                                            }
+                                        }),
+                                    ))
+                                })
+                                .child(button("cancel", "Cancelar").on_click(cx.listener(
+                                    |view, _, _, cx| {
+                                        view.enrollment = None;
+                                        view.status = "Pareamento cancelado".into();
+                                        cx.notify();
+                                    },
+                                ))),
+                        ),
+                )
+            })
+            .when(self.host.is_some() && self.enrollment.is_none(), |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
                             button("refresh", "Atualizar")
                                 .on_click(cx.listener(|this, _, _, cx| this.refresh(None, cx))),
                         )
                         .child(button("explorer", "Abrir Explorador").on_click(cx.listener(
                             |this, _, _, cx| this.refresh(Some(LaunchApp::Explorer), cx),
                         )))
+                        .child(button("notepad", "Abrir Bloco de Notas").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.refresh(Some(LaunchApp::Notepad), cx)
+                            }),
+                        ))
                         .child(
-                            button("notepad", "Abrir Bloco de Notas").on_click(cx.listener(
-                                |this, _, _, cx| this.refresh(Some(LaunchApp::Notepad), cx),
-                            )),
-                        )
-                    }),
-            )
+                            button("forget", "Esquecer host")
+                                .on_click(cx.listener(|this, _, _, cx| this.forget_host(cx))),
+                        ),
+                )
+            })
             .child(
                 div()
                     .id("windows")
@@ -323,18 +535,8 @@ impl Render for Launcher {
                                     .text_color(rgb(0xa5b5c9))
                                     .child(info.process.clone()),
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let options = window_options(cx, &info.title, 900., 600.);
-                                let Some(host) = this.host.clone() else {
-                                    return;
-                                };
-                                let info = info.clone();
-                                if let Err(error) = cx.open_window(options, |window, cx| {
-                                    cx.new(|cx| RemoteView::connect(host, info, window, cx))
-                                }) {
-                                    this.status = error.to_string();
-                                    cx.notify();
-                                }
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_remote(info.clone(), window, cx);
                             }))
                     })),
             )
@@ -342,17 +544,21 @@ impl Render for Launcher {
 }
 
 struct RemoteView {
-    frame: Option<Arc<RenderImage>>,
+    frame: Option<VideoFrame>,
     status: SharedString,
     _task: Task<()>,
-    host: Host,
-    info: WindowInfo,
-    action: Option<Task<()>>,
-    action_error: Option<String>,
+    _chrome_task: Task<()>,
+}
+
+#[derive(Clone)]
+struct VideoFrame {
+    image: Arc<RenderImage>,
+    width: u32,
+    height: u32,
 }
 
 enum Update {
-    Image(Arc<RenderImage>),
+    Image(VideoFrame),
     Closed(String),
 }
 
@@ -373,7 +579,14 @@ fn read_video(host: Host, info: WindowInfo, updates: &async_channel::Sender<Upda
             let buffer = image::RgbaImage::from_raw(frame.width, frame.height, pixels)
                 .ok_or("Frame inválido")?;
             let data = RenderImage::new([image::Frame::new(buffer)]);
-            if updates.force_send(Update::Image(Arc::new(data))).is_err() {
+            if updates
+                .force_send(Update::Image(VideoFrame {
+                    image: Arc::new(data),
+                    width: frame.width,
+                    height: frame.height,
+                }))
+                .is_err()
+            {
                 break;
             }
         }
@@ -381,22 +594,30 @@ fn read_video(host: Host, info: WindowInfo, updates: &async_channel::Sender<Upda
     Ok(())
 }
 
+fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> {
+    let (sender, receiver) = async_channel::bounded(1);
+    thread::spawn(move || {
+        if let Err(error) = read_video(host, info, &sender) {
+            let _ = sender.force_send(Update::Closed(format!("Transmissão encerrada · {error}")));
+        }
+    });
+    receiver
+}
+
 impl RemoteView {
-    fn connect(host: Host, info: WindowInfo, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (sender, receiver) = async_channel::bounded(1);
-        let (video_host, video_info) = (host.clone(), info.clone());
-        thread::spawn(move || {
-            if let Err(error) = read_video(video_host, video_info, &sender) {
-                let _ =
-                    sender.force_send(Update::Closed(format!("Transmissão encerrada · {error}")));
-            }
-        });
+    fn new(
+        frame: VideoFrame,
+        receiver: async_channel::Receiver<Update>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        set_native_aspect(window, frame.width, frame.height);
         let task = cx.spawn_in(window, async move |view, cx| {
             while let Ok(update) = receiver.recv().await {
                 if view
                     .update_in(cx, |this, window, cx| {
                         if let Some(previous) = this.frame.take() {
-                            let _ = window.drop_image(previous);
+                            let _ = window.drop_image(previous.image);
                         }
                         match update {
                             Update::Image(frame) => this.frame = Some(frame),
@@ -410,92 +631,149 @@ impl RemoteView {
                 }
             }
         });
+        set_native_buttons(window, false);
+        let chrome_task = cx.spawn_in(window, async move |view, cx| {
+            let mut visible = false;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(60))
+                    .await;
+                if view
+                    .update_in(cx, |_, window, _| {
+                        let cursor = window.mouse_position();
+                        let within_top = cursor.x >= px(0.)
+                            && cursor.x < window.viewport_size().width
+                            && cursor.y >= px(0.)
+                            && cursor.y < px(if visible { 36. } else { 9. });
+                        if within_top != visible {
+                            set_native_buttons(window, within_top);
+                            visible = within_top;
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
-            frame: None,
+            frame: Some(frame),
             status: "Aguardando imagem do Windows…".into(),
             _task: task,
-            host,
-            info,
-            action: None,
-            action_error: None,
+            _chrome_task: chrome_task,
         }
     }
 }
 
-impl RemoteView {
-    fn control(&mut self, action: WindowAction, cx: &mut Context<Self>) {
-        if self.action.is_some() {
-            return;
+fn remote_options(launcher: &Window, title: &str, frame: &VideoFrame, cx: &App) -> WindowOptions {
+    let display = launcher.display(cx).or_else(|| cx.primary_display());
+    let bounds = display.as_ref().map_or_else(
+        || Bounds::new(point(px(0.), px(0.)), launcher.viewport_size()),
+        |display| display.bounds(),
+    );
+    let work_area = display_work_area(launcher, bounds);
+    let scale = launcher.scale_factor().max(1.);
+    let width = frame.width as f32 / scale;
+    let height = frame.height as f32 / scale;
+    let fit = 1.0_f32
+        .min((work_area.size.width.to_f64() as f32 - 24.).max(1.) / width)
+        .min((work_area.size.height.to_f64() as f32 - 24.).max(1.) / height);
+    let content = size(px(width * fit), px(height * fit));
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered_at(
+            work_area.center(),
+            content,
+        ))),
+        display_id: display.map(|display| display.id()),
+        titlebar: Some(TitlebarOptions {
+            title: Some(title.to_owned().into()),
+            appears_transparent: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn appkit_window(window: &Window) -> Option<std::ptr::NonNull<objc2::runtime::AnyObject>> {
+    use objc2::{msg_send, runtime::AnyObject};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    // GPUI owns the AppKit view and calls this on the UI thread.
+    let native: *mut AnyObject =
+        unsafe { msg_send![handle.ns_view.as_ptr().cast::<AnyObject>(), window] };
+    std::ptr::NonNull::new(native)
+}
+
+fn display_work_area(window: &Window, fallback: Bounds<gpui::Pixels>) -> Bounds<gpui::Pixels> {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_foundation::NSRect;
+    let Some(native) = appkit_window(window) else {
+        return fallback;
+    };
+    let screen: *mut AnyObject = unsafe { msg_send![native.as_ptr(), screen] };
+    if screen.is_null() {
+        return fallback;
+    }
+    let (outer, visible): (NSRect, NSRect) =
+        unsafe { (msg_send![screen, frame], msg_send![screen, visibleFrame]) };
+    let dx = visible.origin.x - outer.origin.x;
+    let dy = outer.origin.y + outer.size.height - visible.origin.y - visible.size.height;
+    Bounds::new(
+        point(
+            fallback.origin.x + px(dx as f32),
+            fallback.origin.y + px(dy as f32),
+        ),
+        size(
+            px(visible.size.width as f32),
+            px(visible.size.height as f32),
+        ),
+    )
+}
+
+fn set_native_aspect(window: &Window, width: u32, height: u32) {
+    use objc2::msg_send;
+    use objc2_foundation::NSSize;
+    if let Some(native) = appkit_window(window) {
+        unsafe {
+            let _: () = msg_send![native.as_ptr(), setContentAspectRatio: NSSize::new(f64::from(width), f64::from(height))];
         }
-        let host = self.host.clone();
-        let request = Request::Control {
-            handle: self.info.handle,
-            process_id: self.info.process_id,
-            action,
-        };
-        let operation = cx.background_executor().spawn(async move {
-            match host.request(request)?.0 {
-                Response::Controlled => Ok(()),
-                _ => Err("Resposta de controle inesperada".into()),
+    }
+}
+
+fn set_native_buttons(window: &Window, visible: bool) {
+    use objc2::{
+        msg_send,
+        runtime::{AnyObject, Bool},
+    };
+    let Some(native) = appkit_window(window) else {
+        return;
+    };
+    unsafe {
+        // NSWindowButton values for close, miniaturize, and zoom.
+        for kind in [0usize, 1, 2] {
+            let button: *mut AnyObject = msg_send![native.as_ptr(), standardWindowButton: kind];
+            if !button.is_null() {
+                let _: () = msg_send![button, setHidden: Bool::new(!visible)];
             }
-        });
-        self.action = Some(cx.spawn(async move |view, cx| {
-            let result: Result<()> = operation.await;
-            let _ = view.update(cx, |view, cx| {
-                view.action = None;
-                view.action_error = result.err().map(|error| error.to_string());
-                cx.notify();
-            });
-        }));
+        }
     }
 }
 
 impl Render for RemoteView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let actions = [
-            ("restore", "Restaurar", WindowAction::Restore),
-            ("minimize", "Minimizar", WindowAction::Minimize),
-            ("maximize", "Maximizar", WindowAction::Maximize),
-            ("close", "Fechar no Windows", WindowAction::Close),
-        ];
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
-            .flex_col()
+            .items_center()
+            .justify_center()
             .bg(rgb(0x101722))
             .text_color(rgb(0xe8edf5))
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .p_2()
-                    .text_sm()
-                    .children(actions.into_iter().map(|(id, label, action)| {
-                        button(id, label)
-                            .on_click(cx.listener(move |view, _, _, cx| view.control(action, cx)))
-                    })),
-            )
-            .when_some(self.action_error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .px_3()
-                        .text_sm()
-                        .text_color(rgb(0xffae9c))
-                        .child(error),
-                )
+            .when_some(self.frame.clone(), |view, frame| {
+                view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
             })
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when_some(self.frame.clone(), |view, frame| {
-                        view.child(img(frame).size_full().object_fit(ObjectFit::Contain))
-                    })
-                    .when(self.frame.is_none(), |view| view.child(self.status.clone())),
-            )
+            .when(self.frame.is_none(), |view| view.child(self.status.clone()))
     }
 }

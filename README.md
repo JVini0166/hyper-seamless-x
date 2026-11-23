@@ -4,15 +4,24 @@ Aplicativos em Rust e GPUI para abrir janelas individuais de um PC Windows 11 no
 
 ## Usar pela interface
 
-Baixe o host para Windows x64 e o cliente para Mac Apple Silicon na página de [releases](https://github.com/JVini0166/hyper-seamless-x/releases). Os pacotes desta prévia têm assinatura ad hoc no Mac e executável sem assinatura no Windows.
+Baixe a mesma versão do host para Windows x64 e do cliente para Mac Apple Silicon na página de [releases](https://github.com/JVini0166/hyper-seamless-x/releases). O executável Windows está sem assinatura e o aplicativo Mac usa assinatura ad hoc.
 
-1. Abra o host no Windows e selecione o endereço da rede local que o Mac usa. Se o Windows solicitar acesso à rede, selecione o perfil privado.
-2. Clique em **Exportar pareamento** e transfira o arquivo JSON ao Mac por um canal privado. O arquivo concede acesso ao Windows enquanto a identidade do host estiver ativa.
-3. Abra **Hyper Seamless X.app** no Mac e clique em **Importar pareamento**. Selecione o JSON. O aplicativo salva o pareamento e lista as janelas disponíveis.
-4. Clique em uma janela para abrir a transmissão. Use os botões do launcher para abrir o Explorador ou o Bloco de Notas e atualizar a lista. A barra da transmissão permite restaurar, minimizar, maximizar e fechar a janela no Windows.
-5. No host, clique em **Parar compartilhamento** para encerrar as transmissões.
+1. No Windows, abra o host e selecione o endereço da sua rede local. Se o Firewall solicitar acesso, autorize no perfil privado.
+2. Clique em **Autorizar novo Mac**. No Mac, digite ou cole o endereço e clique em **Conectar**.
+3. Confira o código exibido nos dois computadores. Clique em **Aprovar Mac** no Windows e confirme a comparação no Mac. O cliente guarda a identidade para as próximas conexões.
+4. Clique em uma janela para abrir a transmissão. Ela abre com a proporção do quadro capturado e é reduzida se ultrapassar a área útil da tela.
+5. Passe o cursor pela borda superior da transmissão para revelar os três botões nativos do macOS. O conteúdo capturado preserva a aparência do aplicativo Windows.
+6. No Windows, clique em **Parar compartilhamento** para encerrar as transmissões.
 
-Se o endereço do Windows mudar, selecione o novo endereço e exporte outro arquivo de pareamento.
+## Endereço de conexão
+
+- IP ou nome na rede local, como `192.168.1.20` ou `pc.local:47651`.
+- Endereço TCP, como `tcp://0.tcp.ngrok.io:12345`.
+- Link HTTP ou HTTPS de um túnel que aceite WebSocket, como `https://exemplo.ngrok.app`.
+
+Para um túnel, selecione **Usar túnel local** no host Windows. Configure o túnel no mesmo Windows para encaminhar para `127.0.0.1:47651`. Cole no Mac o endereço público exibido pelo serviço. O cliente usa WebSocket para URLs HTTP/HTTPS e preserva o TLS entre os aplicativos dentro da conexão do túnel.
+
+O túnel é opcional. O uso direto na LAN dispensa serviços externos. Consulte a documentação do ngrok para [endpoints HTTP](https://ngrok.com/docs/gateway/endpoints/http) e [endpoints TCP](https://ngrok.com/docs/gateway/endpoints/tcp). O ngrok pode aplicar limites do plano e exigir um método de pagamento para habilitar endpoints TCP no plano gratuito.
 
 ## Compilar
 
@@ -24,6 +33,6 @@ Use Rust estável e o toolchain MSVC com as ferramentas de build C++ do Visual S
 
 ## Estado
 
-O fluxo de vídeo experimental usa BGRA com Zstandard por TCP e captura limitada a cerca de 30 quadros por segundo. Ainda faltam mouse e teclado remotos, sincronização automática da geometria das janelas, descoberta mDNS, reconexão, bandeja do Windows e o pipeline WebRTC/H.264 com aceleração por hardware. As metas de latência, resolução e FPS ainda exigem medições.
+O fluxo de vídeo experimental usa BGRA com Zstandard por TCP ou WebSocket e captura limitada a cerca de 30 quadros por segundo. A transmissão é de visualização. Mouse e teclado remotos, sincronização automática da geometria das janelas, descoberta mDNS, reconexão, bandeja do Windows e o pipeline WebRTC/H.264 com aceleração por hardware ainda estão pendentes. As metas de latência, resolução e FPS exigem medições.
 
 [Arquitetura e procedimento de validação](docs/architecture.md).
