@@ -1,0 +1,11 @@
+[package]
+name = "windows-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "=2.0.1"
+protocol = { path = "../../packages/protocol" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde_json = "1"

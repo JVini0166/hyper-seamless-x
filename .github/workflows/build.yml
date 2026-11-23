@@ -1,0 +1,23 @@
+name: Build and test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable
+      - run: cargo test --locked -p protocol
+      - run: cargo build --locked -p windows-host --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-host-x64
+          path: target/release/windows-host.exe
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable
+      - run: cargo test --locked -p protocol
+      - run: cargo build --locked -p macos-client
