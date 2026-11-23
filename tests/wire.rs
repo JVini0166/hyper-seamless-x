@@ -334,3 +334,18 @@ fn h264_metrics_marker_round_trips_without_consuming_the_picture() -> protocol::
     assert!(protocol::HostFrameMetrics::from_h264_marker(&next).is_none());
     Ok(())
 }
+
+#[test]
+fn window_catalog_preserves_minimized_state_and_reads_legacy_entries() -> protocol::Result<()> {
+    use protocol::Response;
+
+    let legacy = r#"{"handle":42,"process_id":7,"title":"Teste","process":"test.exe"}"#;
+    let mut window: protocol::WindowInfo = serde_json::from_str(legacy)?;
+    assert!(!window.minimized);
+    window.minimized = true;
+    let mut wire = Vec::new();
+    protocol::send(&mut wire, &Response::Windows(vec![window]))?;
+    let reply: Response = protocol::receive(&mut Cursor::new(wire))?;
+    assert!(matches!(reply, Response::Windows(windows) if windows[0].minimized));
+    Ok(())
+}

@@ -163,6 +163,7 @@ fn handle(
                         handle: window.as_raw_hwnd() as u64,
                         process_id: window.process_id().ok()?,
                         title: title.chars().take(256).collect(),
+                        minimized: is_minimized(window),
                         process: window
                             .process_name()
                             .unwrap_or_default()
@@ -202,6 +203,9 @@ fn handle(
             h264_metrics,
         } => match find_window(handle, process_id)? {
             Some(window) => {
+                if let Err(error) = restore_for_capture(window, process_id, stop) {
+                    return protocol::send(&mut stream, &Response::Error(error.to_string()));
+                }
                 let rtc = stream
                     .sock
                     .lan_ip()
@@ -323,6 +327,29 @@ fn find_window(handle: u64, process_id: u32) -> Result<Option<Window>> {
     Ok(Window::enumerate()?.into_iter().find(|window| {
         window.as_raw_hwnd() as u64 == handle && window.process_id().ok() == Some(process_id)
     }))
+}
+
+fn is_minimized(window: Window) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
+    unsafe { IsIconic(window.as_raw_hwnd()) != 0 }
+}
+
+fn restore_for_capture(window: Window, process_id: u32, stop: &AtomicBool) -> Result<()> {
+    if !is_minimized(window) {
+        return Ok(());
+    }
+    control_window(window, WindowAction::Restore)?;
+    let deadline = Instant::now() + Duration::from_millis(750);
+    while is_minimized(window) {
+        if stop.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err("A janela continua minimizada no Windows".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    if stop.load(Ordering::Acquire) || window.process_id()? != process_id {
+        return Err("Janela indisponível".into());
+    }
+    Ok(())
 }
 
 fn control_window(window: Window, action: WindowAction) -> Result<()> {

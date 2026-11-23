@@ -76,6 +76,8 @@ pub struct WindowInfo {
     pub process_id: u32,
     pub title: String,
     pub process: String,
+    #[serde(default)]
+    pub minimized: bool,
 }
 
 #[derive(Serialize, Deserialize)]

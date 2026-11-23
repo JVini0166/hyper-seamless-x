@@ -469,7 +469,7 @@ impl Launcher {
         if let Some(handle) = self.open_windows.get(&key)
             && handle
                 .update(cx, |view, window, _| {
-                    if view.frame.is_none() {
+                    if view.frame.is_none() || info.minimized {
                         window.remove_window();
                         false
                     } else {
@@ -841,12 +841,13 @@ impl Render for Launcher {
                             .hover(|style| style.bg(rgb(0x26374b)))
                             .cursor_pointer()
                             .child(div().child(info.title.clone()))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0xa5b5c9))
-                                    .child(info.process.clone()),
-                            )
+                            .child(div().text_sm().text_color(rgb(0xa5b5c9)).child(
+                                if info.minimized {
+                                    format!("{} · minimizada no Windows", info.process)
+                                } else {
+                                    info.process.clone()
+                                },
+                            ))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_remote(info.clone(), window, cx);
                             }))
@@ -1932,6 +1933,7 @@ mod tests {
             process_id: 42,
             title: "Teste".into(),
             process: process.into(),
+            minimized: false,
         };
         let before = [window(1, "Code.exe")];
         let after = [
@@ -2088,6 +2090,7 @@ mod tests {
                 process_id: 7,
                 title: "Janela de teste".into(),
                 process: "test.exe".into(),
+                minimized: false,
             },
             false,
         );
@@ -2197,6 +2200,7 @@ mod tests {
                 process_id: 7,
                 title: "Janela de teste".into(),
                 process: "test.exe".into(),
+                minimized: false,
             },
             false,
         );
