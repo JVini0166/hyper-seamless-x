@@ -24,7 +24,8 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
                 hello.request,
                 Request::Input {
                     handle: 42,
-                    process_id: 7
+                    process_id: 7,
+                    focus: true,
                 }
             ));
             if !should_accept {
@@ -32,7 +33,12 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
                 continue;
             }
             hello.verify(&host_pairing)?;
-            protocol::send(&mut stream, &Response::InputReady)?;
+            protocol::send(&mut stream, &Response::InputReadyWithFocus)?;
+            assert!(matches!(
+                protocol::receive::<InputEvent>(&mut stream)?,
+                InputEvent::Focus
+            ));
+            protocol::send(&mut stream, &Response::Controlled)?;
             let click: InputEvent = protocol::receive(&mut stream)?;
             assert!(matches!(
                 click,
@@ -71,6 +77,7 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
                 request: Request::Input {
                     handle: 42,
                     process_id: 7,
+                    focus: true,
                 },
             },
         )?;
@@ -83,9 +90,10 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
     let mut stream = connect(pairing.token)?;
     assert!(matches!(
         protocol::receive::<Response>(&mut stream)?,
-        Response::InputReady
+        Response::InputReadyWithFocus
     ));
     for event in [
+        InputEvent::Focus,
         InputEvent::Click {
             x: 123,
             y: 456,

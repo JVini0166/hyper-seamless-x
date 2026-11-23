@@ -206,7 +206,11 @@ fn handle(
             }
             None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
         },
-        Request::Input { handle, process_id } => serve_input(&mut stream, handle, process_id, stop),
+        Request::Input {
+            handle,
+            process_id,
+            focus,
+        } => serve_input(&mut stream, handle, process_id, focus, stop),
         Request::Control {
             handle,
             process_id,
@@ -224,12 +228,23 @@ fn handle(
     }
 }
 
-fn serve_input(stream: &mut Stream, handle: u64, process_id: u32, stop: &AtomicBool) -> Result<()> {
+fn serve_input(
+    stream: &mut Stream,
+    handle: u64,
+    process_id: u32,
+    focus: bool,
+    stop: &AtomicBool,
+) -> Result<()> {
     use protocol::InputEvent;
     if find_window(handle, process_id)?.is_none() {
         return protocol::send(stream, &Response::Error("Janela indisponível".into()));
     }
-    protocol::send(stream, &Response::InputReady)?;
+    let ready = if focus {
+        Response::InputReadyWithFocus
+    } else {
+        Response::InputReady
+    };
+    protocol::send(stream, &ready)?;
     while !stop.load(Ordering::Acquire) {
         let event: InputEvent = protocol::receive(stream)?;
         if stop.load(Ordering::Acquire) {
@@ -247,6 +262,7 @@ fn serve_input(stream: &mut Stream, handle: u64, process_id: u32, stop: &AtomicB
                 vertical,
             } => scroll_window(window, x, y, horizontal, vertical),
             InputEvent::Key(key) => send_key(window, key),
+            InputEvent::Focus => focus_window(window),
         };
         let response = match result {
             Ok(()) => Response::Controlled,
@@ -625,6 +641,27 @@ fn send_h264(
         *last = Some(mode);
     }
     protocol::send_h264_access_unit(stream, unit)
+}
+
+fn focus_window(window: Window) -> Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsIconic, SetForegroundWindow,
+    };
+
+    let _guard = INPUT_LOCK.lock().map_err(|_| "Entrada indisponível")?;
+    let hwnd = window.as_raw_hwnd();
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            return Err("Restaure a janela no Windows antes de focá-la".into());
+        }
+        if GetForegroundWindow() != hwnd {
+            SetForegroundWindow(hwnd);
+        }
+        if GetForegroundWindow() != hwnd {
+            return Err("O Windows não permitiu focar a janela".into());
+        }
+    }
+    Ok(())
 }
 
 fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton) -> Result<()> {

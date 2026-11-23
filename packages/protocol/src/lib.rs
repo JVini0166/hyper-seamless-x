@@ -111,6 +111,8 @@ pub enum Request {
     Input {
         handle: u64,
         process_id: u32,
+        #[serde(default)]
+        focus: bool,
     },
     Control {
         handle: u64,
@@ -133,6 +135,7 @@ pub enum InputEvent {
         vertical: i16,
     },
     Key(RemoteKey),
+    Focus,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -193,6 +196,7 @@ pub enum Response {
     StreamingH264,
     StreamingRtc { answer: String },
     InputReady,
+    InputReadyWithFocus,
     Launched,
     Controlled,
     Error(String),

@@ -708,33 +708,43 @@ impl Render for Launcher {
 struct InputSession {
     host: Host,
     target: (u64, u32),
-    stream: Option<(Instant, StreamOwned<ClientConnection, Wire>)>,
+    stream: Option<(Instant, StreamOwned<ClientConnection, Wire>, bool)>,
 }
 
 impl InputSession {
     fn send(&mut self, queued: Instant, event: protocol::InputEvent) -> Result<()> {
         // The host expires idle readers after five seconds. Reconnect before that
         // threshold, and never replay an event after a write may have succeeded.
-        let mut stream = match self.stream.take() {
-            Some((last, stream)) if last.elapsed() < Duration::from_secs(3) => stream,
+        let (mut stream, focus_supported) = match self.stream.take() {
+            Some((last, stream, focus)) if last.elapsed() < Duration::from_secs(3) => {
+                (stream, focus)
+            }
             _ => {
                 let (handle, process_id) = self.target;
-                let (response, stream) =
-                    self.host.request(Request::Input { handle, process_id })?;
-                if !matches!(response, Response::InputReady) {
-                    return Err("Resposta de canal de entrada inesperada".into());
+                let (response, stream) = self.host.request(Request::Input {
+                    handle,
+                    process_id,
+                    focus: true,
+                })?;
+                match response {
+                    Response::InputReadyWithFocus => (stream, true),
+                    Response::InputReady => (stream, false),
+                    _ => return Err("Resposta de canal de entrada inesperada".into()),
                 }
-                stream
             }
         };
         let sent_at = Instant::now();
+        if matches!(event, protocol::InputEvent::Focus) && !focus_supported {
+            self.stream = Some((sent_at, stream, focus_supported));
+            return Ok(());
+        }
         if sent_at.duration_since(queued) >= Duration::from_secs(1) {
-            self.stream = Some((sent_at, stream));
+            self.stream = Some((sent_at, stream, focus_supported));
             return Err("Entrada descartada após atraso na conexão".into());
         }
         protocol::send(&mut stream, &event)?;
         let response = protocol::receive(&mut stream)?;
-        self.stream = Some((sent_at, stream));
+        self.stream = Some((sent_at, stream, focus_supported));
         match response {
             Response::Controlled => Ok(()),
             Response::Error(message) => Err(message.into()),
@@ -750,6 +760,7 @@ struct RemoteView {
     _task: Task<()>,
     _chrome_task: Task<()>,
     _input_task: Task<()>,
+    _activation: Subscription,
     input: async_channel::Sender<(Instant, protocol::InputEvent)>,
     focus: gpui::FocusHandle,
     scroll_remainder: (f64, f64),
@@ -1152,6 +1163,15 @@ impl RemoteView {
                 }
             }
         });
+        let activation = cx.observe_window_activation(window, |view, window, cx| {
+            if window.is_window_active() && view.frame.is_some() {
+                view.queue(protocol::InputEvent::Focus, cx);
+            }
+        });
+        if window.is_window_active() {
+            let _ = input.try_send((Instant::now(), protocol::InputEvent::Focus));
+        }
+
         let input_task = cx.spawn(async move |view, cx| {
             while let Ok(error) = feedback.recv().await {
                 if view
@@ -1235,6 +1255,7 @@ impl RemoteView {
             _task: task,
             _chrome_task: chrome_task,
             _input_task: input_task,
+            _activation: activation,
             input,
             focus,
             scroll_remainder: (0., 0.),
