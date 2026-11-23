@@ -1706,17 +1706,24 @@ fn display_work_area(window: &Window, fallback: Bounds<gpui::Pixels>) -> Bounds<
 }
 
 fn set_native_geometry(window: &Window, width: u32, height: u32) {
-    use objc2::msg_send;
-    use objc2_foundation::NSSize;
+    use objc2::{msg_send, runtime::Bool};
+    use objc2_foundation::{NSRect, NSSize};
     if let Some(native) = appkit_window(window) {
         unsafe {
             let pixels = NSSize::new(f64::from(width), f64::from(height));
             let _: () = msg_send![native.as_ptr(), setContentAspectRatio: pixels];
             if !window.is_fullscreen() {
                 let backing_scale: f64 = msg_send![native.as_ptr(), backingScaleFactor];
-                let content =
+                let frame: NSRect = msg_send![native.as_ptr(), frame];
+                let mut content: NSRect =
+                    msg_send![native.as_ptr(), contentRectForFrameRect: frame];
+                content.size =
                     NSSize::new(pixels.width / backing_scale, pixels.height / backing_scale);
-                let _: () = msg_send![native.as_ptr(), setContentSize: content];
+                let mut resized: NSRect =
+                    msg_send![native.as_ptr(), frameRectForContentRect: content];
+                // Keep the top edge fixed and preserve half points for odd Retina dimensions.
+                resized.origin.y = frame.origin.y + frame.size.height - resized.size.height;
+                let _: () = msg_send![native.as_ptr(), setFrame: resized, display: Bool::YES];
             }
         }
     }
