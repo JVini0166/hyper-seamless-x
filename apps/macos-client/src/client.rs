@@ -181,6 +181,7 @@ pub fn run() -> Result<()> {
                     _enter: enter,
                     discovered: BTreeMap::new(),
                     _discovery: watch_discovery(cx),
+                    _catalog_watch: watch_catalog(window, cx),
                 };
                 launcher.refresh(cx);
                 launcher
@@ -230,6 +231,54 @@ struct Launcher {
     _enter: Subscription,
     discovered: BTreeMap<String, (String, SocketAddr)>,
     _discovery: Option<Task<()>>,
+    _catalog_watch: Task<()>,
+}
+
+fn watch_catalog(window: &mut Window, cx: &mut Context<Launcher>) -> Task<()> {
+    cx.spawn_in(window, async move |view, cx| {
+        loop {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            let host = match view.update_in(cx, |view, window, _| {
+                if window.is_window_active() && view.task.is_none() && view.enrollment.is_none() {
+                    view.host.clone()
+                } else {
+                    None
+                }
+            }) {
+                Ok(Some(host)) => host,
+                Ok(None) => continue,
+                Err(_) => break,
+            };
+            let identity = host.config.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { host.list() })
+                .await;
+            let Ok((windows, apps)) = result else {
+                continue;
+            };
+            if view
+                .update_in(cx, |view, window, cx| {
+                    if window.is_window_active()
+                        && view.task.is_none()
+                        && view.enrollment.is_none()
+                        && view.opening.is_empty()
+                        && view
+                            .host
+                            .as_ref()
+                            .is_some_and(|host| Arc::ptr_eq(&host.config, &identity))
+                        && (view.windows != windows || view.launchable_apps != apps)
+                    {
+                        view.set_catalog(windows, apps);
+                        cx.notify();
+                    }
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
 }
 
 struct Discovery(mdns_sd::ServiceDaemon);
