@@ -16,6 +16,8 @@ pub const VERSION: u16 = 2;
 pub const SERVER_NAME: &str = "hyper-seamless-x.local";
 pub const MAX_METADATA: usize = 256 * 1024;
 pub const MAX_PIXELS: usize = 4096 * 2160;
+/// Upper limit for capture cadence before encoder and network constraints.
+pub const MIN_CAPTURE_INTERVAL_MS: u32 = 16;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Pairing {

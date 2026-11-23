@@ -50,6 +50,9 @@ pub struct Encoder {
 // session and its immediate context, including capture callbacks.
 unsafe impl Send for Encoder {}
 
+const FRAMES_PER_SECOND: u32 = 60;
+const TICKS_PER_FRAME: u64 = 10_000_000 / FRAMES_PER_SECOND as u64;
+
 pub(crate) fn target_bitrate(width: u32, height: u32, limit: u32) -> u32 {
     let native = width
         .saturating_mul(height)
@@ -178,13 +181,13 @@ impl Encoder {
             tuning,
             &mut preset
         )?;
-        preset.presetCfg.gopLength = 60;
+        preset.presetCfg.gopLength = FRAMES_PER_SECOND * 2;
         preset.presetCfg.frameIntervalP = 1;
         let rate = &mut preset.presetCfg.rcParams;
         rate.rateControlMode = NV_ENC_PARAMS_RC_MODE::CBR;
         rate.averageBitRate = self.bitrate;
         rate.maxBitRate = rate.averageBitRate;
-        rate.vbvBufferSize = rate.averageBitRate / 30;
+        rate.vbvBufferSize = rate.averageBitRate / FRAMES_PER_SECOND;
         rate.vbvInitialDelay = rate.vbvBufferSize;
         rate.set_enableLookahead(0);
         let mut params: NV_ENC_INITIALIZE_PARAMS = unsafe { std::mem::zeroed() };
@@ -195,7 +198,7 @@ impl Encoder {
         params.encodeHeight = self.height;
         params.darWidth = self.width;
         params.darHeight = self.height;
-        params.frameRateNum = 30;
+        params.frameRateNum = FRAMES_PER_SECOND;
         params.frameRateDen = 1;
         params.enablePTD = 1;
         params.tuningInfo = tuning;
@@ -316,9 +319,9 @@ impl Encoder {
         picture.bufferFmt = input.mappedBufferFmt;
         picture.pictureStruct = NV_ENC_PIC_STRUCT::FRAME;
         picture.frameIdx = self.frame_index;
-        picture.inputTimeStamp = u64::from(self.frame_index) * 333_333;
-        picture.inputDuration = 333_333;
-        if force_keyframe || self.frame_index.is_multiple_of(60) {
+        picture.inputTimeStamp = u64::from(self.frame_index) * TICKS_PER_FRAME;
+        picture.inputDuration = TICKS_PER_FRAME;
+        if force_keyframe || self.frame_index.is_multiple_of(FRAMES_PER_SECOND * 2) {
             picture.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
         }
         nv_call!(self.api, nvEncEncodePicture, self.session, &mut picture)?;

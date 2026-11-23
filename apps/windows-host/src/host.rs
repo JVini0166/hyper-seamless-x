@@ -358,7 +358,11 @@ impl GraphicsCaptureApiHandler for Capture {
         _: InternalCaptureControl,
     ) -> Result<()> {
         let started = Instant::now();
-        let interval_ms = self.latest.interval_ms.load(Ordering::Relaxed).max(33);
+        let interval_ms = self
+            .latest
+            .interval_ms
+            .load(Ordering::Relaxed)
+            .max(protocol::MIN_CAPTURE_INTERVAL_MS);
         if self.last.elapsed() < Duration::from_millis(u64::from(interval_ms)) {
             self.latest.dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());

@@ -34,13 +34,15 @@ struct Encoder {
 
 #define HSX_TRY(operation) do { const HRESULT result = (operation); if (FAILED(result)) return result; } while (0)
 
+static constexpr UINT32 frames_per_second = 60;
+
 static HRESULT make_type(UINT32 width, UINT32 height, REFGUID subtype, IMFMediaType **result) {
     ComPtr<IMFMediaType> type;
     HSX_TRY(MFCreateMediaType(&type));
     HSX_TRY(type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
     HSX_TRY(type->SetGUID(MF_MT_SUBTYPE, subtype));
     HSX_TRY(MFSetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, width, height));
-    HSX_TRY(MFSetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, 30, 1));
+    HSX_TRY(MFSetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, frames_per_second, 1));
     HSX_TRY(MFSetAttributeRatio(type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
     HSX_TRY(type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
     HSX_TRY(type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601));
@@ -119,7 +121,7 @@ static HRESULT encode(Encoder &encoder, const std::uint8_t *pixels) {
     ComPtr<IMFSample> input;
     HSX_TRY(MFCreateSample(&input));
     HSX_TRY(input->AddBuffer(input_buffer.Get()));
-    constexpr LONGLONG frame_duration = 10000000 / 30;
+    constexpr LONGLONG frame_duration = 10000000 / frames_per_second;
     HSX_TRY(input->SetSampleTime(encoder.timestamp));
     HSX_TRY(input->SetSampleDuration(frame_duration));
     HSX_TRY(encoder.transform->ProcessInput(0, input.Get(), 0));

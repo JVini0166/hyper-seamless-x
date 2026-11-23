@@ -111,7 +111,7 @@ impl VideoPeer {
         let budget = u64::from(self.bitrate_budget()?);
         let interval = self.average_frame_bits?.saturating_mul(1000) / budget.max(1);
         // Preserve capture responsiveness while reducing the number of encoded frames.
-        Some(interval.clamp(33, 200) as u32)
+        Some(interval.clamp(u64::from(crate::MIN_CAPTURE_INTERVAL_MS), 200) as u32)
     }
 
     pub fn request_keyframe(&mut self) -> Result<()> {
@@ -220,7 +220,10 @@ mod tests {
                 host.estimated_bps = Some(1_000_000);
                 assert_eq!(host.capture_interval_ms(), Some(125));
                 host.estimated_bps = Some(10_000_000);
-                assert_eq!(host.capture_interval_ms(), Some(33));
+                assert_eq!(
+                    host.capture_interval_ms(),
+                    Some(crate::MIN_CAPTURE_INTERVAL_MS)
+                );
                 return Ok(());
             }
             if !sent && host.ready() && client.ready() {
