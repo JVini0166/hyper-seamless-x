@@ -13,6 +13,8 @@ Baixe a mesma versão do host para Windows x64 e do cliente para Mac Apple Silic
 5. Passe o cursor pela borda superior da transmissão para revelar os três botões nativos do macOS. O conteúdo capturado preserva a aparência do aplicativo Windows.
 6. No Windows, clique em **Parar compartilhamento** para encerrar as transmissões.
 
+No launcher do Mac, ative **Diagnósticos nas novas janelas** para exibir FPS recebidos, bitrate e tempo de decodificação na próxima transmissão.
+
 ## Endereço de conexão
 
 - IP ou nome na rede local, como `192.168.1.20` ou `pc.local:47651`.

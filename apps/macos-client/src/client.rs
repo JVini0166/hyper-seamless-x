@@ -166,6 +166,7 @@ pub fn run() -> Result<()> {
                     windows: Vec::new(),
                     opening: HashSet::new(),
                     open_windows: HashMap::new(),
+                    diagnostics: false,
                     status,
                     task: None,
                     enrollment: None,
@@ -213,6 +214,7 @@ struct Launcher {
     windows: Vec<WindowInfo>,
     opening: HashSet<(u64, u32)>,
     open_windows: HashMap<(u64, u32), WindowHandle<RemoteView>>,
+    diagnostics: bool,
     status: String,
     task: Option<Task<()>>,
     enrollment: Option<Enrollment>,
@@ -424,7 +426,8 @@ impl Launcher {
             return;
         }
         let title = info.title.clone();
-        let frames = start_video(host.clone(), info.clone());
+        let diagnostics = self.diagnostics;
+        let frames = start_video(host.clone(), info.clone(), diagnostics);
         self.status = format!("Abrindo {title}…");
         cx.spawn_in(window, async move |view, cx| {
             let timeout = cx.background_executor().timer(Duration::from_secs(15));
@@ -446,7 +449,9 @@ impl Launcher {
                     Some(Update::Image(frame)) => {
                         let options = remote_options(window, &title, &frame, cx);
                         match cx.open_window(options, |window, cx| {
-                            cx.new(|cx| RemoteView::new(frame, frames, host, info, window, cx))
+                            cx.new(|cx| {
+                                RemoteView::new(frame, frames, host, info, diagnostics, window, cx)
+                            })
                         }) {
                             Ok(handle) => {
                                 view.open_windows.insert(key, handle);
@@ -671,6 +676,19 @@ impl Render for Launcher {
                         ),
                 )
             })
+            .when(self.host.is_some() && self.enrollment.is_none(), |view| {
+                let label = if self.diagnostics {
+                    "Diagnósticos nas novas janelas · ativos"
+                } else {
+                    "Diagnósticos nas novas janelas · desativados"
+                };
+                view.child(
+                    button("diagnostics", label).on_click(cx.listener(|view, _, _, cx| {
+                        view.diagnostics = !view.diagnostics;
+                        cx.notify();
+                    })),
+                )
+            })
             .child(
                 div()
                     .id("windows")
@@ -766,6 +784,8 @@ struct RemoteView {
     scroll_remainder: (f64, f64),
     drag_origin: Option<gpui::Point<gpui::Pixels>>,
     input_error: Option<String>,
+    diagnostics: Option<SharedString>,
+    show_diagnostics: bool,
 }
 
 #[derive(Clone)]
@@ -773,6 +793,7 @@ struct VideoFrame {
     image: Arc<RenderImage>,
     width: u32,
     height: u32,
+    diagnostics: Option<SharedString>,
 }
 
 enum Update {
@@ -795,9 +816,10 @@ fn read_video(
     delivered: &mut bool,
     h264: bool,
     try_rtc: bool,
+    metrics: bool,
 ) -> Result<VideoEnd> {
-    let metrics = std::env::var_os("HSX_METRICS").is_some();
     let mut report = VideoMetrics::default();
+    let mut diagnostics = None;
     let socket = host.addr.connect(Duration::from_secs(8))?;
     let rtc = socket
         .lan_ip()
@@ -928,13 +950,15 @@ fn read_video(
             Frame::receive_with_metrics(stream.as_mut().ok_or("Fluxo TLS indisponível")?)?
         };
         if let Some(packet) = packet {
-            if metrics {
-                report.record(
+            if metrics
+                && let Some(summary) = report.record(
                     info.handle,
                     &packet,
                     decoder.as_ref().map(crate::h264::Decoder::mode),
                     encoder,
-                );
+                )
+            {
+                diagnostics = Some(summary);
             }
             let frame = packet.frame;
             let mut pixels = frame.bgra;
@@ -949,6 +973,7 @@ fn read_video(
                     image: Arc::new(data),
                     width: frame.width,
                     height: frame.height,
+                    diagnostics: diagnostics.clone(),
                 }))
                 .is_err()
             {
@@ -1032,7 +1057,7 @@ impl VideoMetrics {
         packet: &protocol::ReceivedFrame,
         mode: Option<crate::h264::DecoderMode>,
         encoder: Option<protocol::EncoderMode>,
-    ) {
+    ) -> Option<SharedString> {
         self.frames += 1;
         self.bytes += packet.compressed_bytes as u64;
         self.decode += u64::from(packet.decode_micros);
@@ -1044,7 +1069,7 @@ impl VideoMetrics {
         }
         let seconds = self.since.elapsed().as_secs_f64();
         if seconds < 1. {
-            return;
+            return None;
         }
         let host = if self.host_samples > 0 {
             format!(
@@ -1076,20 +1101,40 @@ impl VideoMetrics {
             self.bytes as f64 * 0.008 / seconds,
             self.decode / self.frames
         );
+        let summary = format!(
+            "{:.0} FPS recebidos · {:.1} Mb/s · {:.1} ms de decodificação",
+            self.frames as f64 / seconds,
+            self.bytes as f64 * 0.000_008 / seconds,
+            self.decode as f64 / self.frames as f64 / 1000.0,
+        );
         *self = Self::default();
+        Some(summary.into())
     }
 }
 
-fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> {
+fn start_video(
+    host: Host,
+    info: WindowInfo,
+    show_diagnostics: bool,
+) -> async_channel::Receiver<Update> {
     let (sender, receiver) = async_channel::bounded(1);
     thread::spawn(move || {
         let mut has_opened = false;
         let mut retries = 0;
         let mut h264 = true;
         let mut try_rtc = true;
+        let metrics = show_diagnostics || std::env::var_os("HSX_METRICS").is_some();
         loop {
             let mut delivered = false;
-            let outcome = read_video(&host, &info, &sender, &mut delivered, h264, try_rtc);
+            let outcome = read_video(
+                &host,
+                &info,
+                &sender,
+                &mut delivered,
+                h264,
+                try_rtc,
+                metrics,
+            );
             if sender.is_closed() {
                 break;
             }
@@ -1172,6 +1217,7 @@ impl RemoteView {
         receiver: async_channel::Receiver<Update>,
         host: Host,
         info: WindowInfo,
+        show_diagnostics: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1233,6 +1279,9 @@ impl RemoteView {
                     .update_in(cx, |this, window, cx| {
                         match update {
                             Update::Image(frame) => {
+                                if let Some(metrics) = frame.diagnostics.clone() {
+                                    this.diagnostics = Some(metrics);
+                                }
                                 if this.frame.as_ref().is_none_or(|previous| {
                                     (previous.width, previous.height) != (frame.width, frame.height)
                                 }) {
@@ -1244,6 +1293,7 @@ impl RemoteView {
                                 this.reconnecting = None;
                             }
                             Update::Reconnecting(message) => {
+                                this.diagnostics = None;
                                 this.reconnecting = Some(message);
                                 this.input_error = None;
                             }
@@ -1303,6 +1353,8 @@ impl RemoteView {
             scroll_remainder: (0., 0.),
             drag_origin: None,
             input_error: None,
+            diagnostics: None,
+            show_diagnostics,
         }
     }
 }
@@ -1613,6 +1665,25 @@ impl Render for RemoteView {
             .when_some(self.frame.clone(), |view, frame| {
                 view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
             })
+            .when_some(
+                self.diagnostics
+                    .clone()
+                    .filter(|_| self.show_diagnostics && self.frame.is_some()),
+                |view, diagnostics| {
+                    view.child(
+                        div()
+                            .absolute()
+                            .top(px(42.))
+                            .left(px(12.))
+                            .bg(rgb(0x172333))
+                            .text_sm()
+                            .rounded_sm()
+                            .px_2()
+                            .py_1()
+                            .child(diagnostics),
+                    )
+                },
+            )
             .when(self.frame.is_none(), |view| view.child(self.status.clone()))
             .when_some(
                 self.reconnecting
@@ -1736,6 +1807,7 @@ mod tests {
                 title: "Janela de teste".into(),
                 process: "test.exe".into(),
             },
+            false,
         );
         let (observed, events) = mpsc::sync_channel(4);
         let relay = thread::spawn(move || {
@@ -1844,6 +1916,7 @@ mod tests {
                 title: "Janela de teste".into(),
                 process: "test.exe".into(),
             },
+            false,
         );
         let (observed, events) = mpsc::sync_channel(1);
         let relay = thread::spawn(move || -> Result<()> {
