@@ -104,6 +104,8 @@ pub enum Request {
         metrics: bool,
         #[serde(default)]
         h264: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rtc_offer: Option<String>,
     },
     Launch(LaunchApp),
     Input {
@@ -189,6 +191,7 @@ pub enum Response {
     Windows(Vec<WindowInfo>),
     Streaming,
     StreamingH264,
+    StreamingRtc { answer: String },
     InputReady,
     Launched,
     Controlled,

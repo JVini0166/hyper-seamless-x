@@ -193,8 +193,17 @@ fn handle(
             process_id,
             metrics,
             h264,
+            rtc_offer,
         } => match find_window(handle, process_id)? {
-            Some(window) => capture(window, &mut stream, stop, metrics, h264),
+            Some(window) => {
+                let rtc = stream
+                    .sock
+                    .lan_ip()
+                    .zip(rtc_offer.as_deref())
+                    .filter(|_| h264)
+                    .and_then(|(ip, offer)| protocol::rtc::VideoPeer::answer(ip, offer).ok());
+                capture(window, &mut stream, stop, metrics, h264, rtc)
+            }
             None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
         },
         Request::Input { handle, process_id } => serve_input(&mut stream, handle, process_id, stop),
@@ -415,7 +424,22 @@ fn capture(
     stop: &AtomicBool,
     metrics: bool,
     h264: bool,
+    rtc: Option<(protocol::rtc::VideoPeer, String)>,
 ) -> Result<()> {
+    let mut rtc = if let Some((mut peer, answer)) = rtc {
+        protocol::send(stream, &Response::StreamingRtc { answer })?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !peer.ready() {
+            if stop.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Ok(());
+            }
+            peer.poll()?;
+            thread::sleep(Duration::from_millis(2));
+        }
+        Some(peer)
+    } else {
+        None
+    };
     let latest = Latest::default();
     let settings = Settings::new(
         window,
@@ -432,28 +456,43 @@ fn capture(
         Err(error) => return protocol::send(stream, &Response::Error(error.to_string())),
     };
     let result = (|| {
-        let mut announced = !h264;
+        let mut announced = !h264 || rtc.is_some();
         let mut h264_enabled = h264;
         let mut last_encoder = None;
         let mut encoder: Option<crate::h264::Encoder> = None;
-        if announced {
+        if !h264 {
             protocol::send(stream, &Response::Streaming)?;
         }
         let mut last_write = Instant::now();
+        let mut last_heartbeat = Instant::now();
         while !control.is_finished() && !stop.load(Ordering::Acquire) {
+            if let Some(peer) = rtc.as_mut() {
+                peer.poll()?;
+                if !peer.ready() {
+                    break;
+                }
+                if last_heartbeat.elapsed() >= Duration::from_secs(2) {
+                    protocol::heartbeat(stream)?;
+                    last_heartbeat = Instant::now();
+                }
+            }
             let frame = latest
                 .newest
                 .lock()
                 .map_err(|_| "Fila de captura indisponível")?
                 .take();
-            if let Some(CapturedPacket::H264(unit)) = &frame {
+            if let Some(CapturedPacket::H264(unit)) = frame {
+                if let Some(peer) = rtc.as_mut() {
+                    peer.send(unit)?;
+                    continue;
+                }
                 if !announced {
                     protocol::send(stream, &Response::StreamingH264)?;
                     announced = true;
                 }
                 send_h264(
                     stream,
-                    unit,
+                    &unit,
                     protocol::EncoderMode::NvencGpuCopy,
                     metrics,
                     &mut last_encoder,
@@ -467,6 +506,10 @@ fn capture(
                     let encoded = encode_h264_frame(&mut encoder, &frame);
                     match encoded {
                         Ok((unit, mode)) => {
+                            if let Some(peer) = rtc.as_mut() {
+                                peer.send(unit)?;
+                                continue;
+                            }
                             if !announced {
                                 protocol::send(stream, &Response::StreamingH264)?;
                                 announced = true;
@@ -476,6 +519,9 @@ fn capture(
                             continue;
                         }
                         Err(_) => {
+                            if rtc.is_some() {
+                                break;
+                            }
                             if announced {
                                 protocol::send_h264_access_unit(
                                     stream,
@@ -493,11 +539,11 @@ fn capture(
                 }
                 frame.send_with_metrics(stream, metrics.then_some((capture_micros, dropped)))?;
                 last_write = Instant::now();
-            } else if announced && last_write.elapsed() >= Duration::from_secs(2) {
+            } else if rtc.is_none() && announced && last_write.elapsed() >= Duration::from_secs(2) {
                 protocol::heartbeat(stream)?;
                 last_write = Instant::now();
             } else {
-                thread::sleep(Duration::from_millis(8));
+                thread::sleep(Duration::from_millis(if rtc.is_some() { 2 } else { 8 }));
             }
         }
         stream.conn.send_close_notify();

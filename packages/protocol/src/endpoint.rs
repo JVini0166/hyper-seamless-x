@@ -92,7 +92,7 @@ impl Endpoint {
                     socket.set_write_timeout(Some(Duration::from_secs(5)))?;
                     socket.set_nodelay(true)?;
                     if self.0.scheme() == "tcp" {
-                        return Ok(Wire(Box::new(socket)));
+                        return Wire::tcp(socket);
                     }
                     let request = self.0.as_str().into_client_request()?;
                     let (ws, _) = tungstenite::client_tls_with_config(
@@ -105,7 +105,7 @@ impl Endpoint {
                         tungstenite::HandshakeError::Failure(error) => websocket_error(error),
                         error => io::Error::other(error.to_string()),
                     })?;
-                    return Ok(Wire(Box::new(SocketWire::new(ws))));
+                    return Ok(Wire(Box::new(SocketWire::new(ws)), None));
                 }
                 Err(error) => last_error = Some(error),
             }
@@ -147,7 +147,26 @@ impl fmt::Display for Endpoint {
 trait Duplex: Read + Write + Send {}
 impl<T: Read + Write + Send> Duplex for T {}
 
-pub struct Wire(Box<dyn Duplex>);
+pub struct Wire(Box<dyn Duplex>, Option<std::net::IpAddr>);
+
+impl Wire {
+    fn tcp(socket: TcpStream) -> Result<Self> {
+        use std::net::IpAddr;
+        let peer = socket.peer_addr()?.ip();
+        let direct = match peer {
+            IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+            IpAddr::V6(ip) => {
+                ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_loopback()
+            }
+        };
+        let local = socket.local_addr()?.ip();
+        Ok(Self(Box::new(socket), direct.then_some(local)))
+    }
+
+    pub fn lan_ip(&self) -> Option<std::net::IpAddr> {
+        self.1
+    }
+}
 
 impl Read for Wire {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -172,7 +191,7 @@ pub fn use_incoming(socket: TcpStream) -> Result<Wire> {
     let mut first = [0];
     socket.peek(&mut first)?;
     match first[0] {
-        0x16 => Ok(Wire(Box::new(socket))), // TLS handshake record.
+        0x16 => Wire::tcp(socket), // TLS handshake record.
         b'G' => {
             let ws = tungstenite::accept_hdr_with_config(
                 socket,
@@ -189,7 +208,7 @@ pub fn use_incoming(socket: TcpStream) -> Result<Wire> {
                 Some(ws_config()),
             )
             .map_err(|error| io::Error::other(error.to_string()))?;
-            Ok(Wire(Box::new(SocketWire::new(ws))))
+            Ok(Wire(Box::new(SocketWire::new(ws)), None))
         }
         _ => {
             let _ = socket.shutdown(Shutdown::Both);

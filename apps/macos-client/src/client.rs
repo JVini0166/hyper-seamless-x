@@ -40,6 +40,14 @@ impl Host {
 
     fn request(&self, request: Request) -> Result<(Response, StreamOwned<ClientConnection, Wire>)> {
         let socket = self.addr.connect(Duration::from_secs(8))?;
+        self.request_on(socket, request)
+    }
+
+    fn request_on(
+        &self,
+        socket: Wire,
+        request: Request,
+    ) -> Result<(Response, StreamOwned<ClientConnection, Wire>)> {
         let conn = ClientConnection::new(self.config.clone(), protocol::SERVER_NAME.try_into()?)?;
         let mut stream = StreamOwned::new(conn, socket);
         protocol::send(
@@ -728,6 +736,7 @@ enum Update {
 enum VideoEnd {
     ViewClosed,
     DecoderRejected(protocol::Error),
+    RtcUnavailable,
 }
 
 fn read_video(
@@ -736,24 +745,71 @@ fn read_video(
     updates: &async_channel::Sender<Update>,
     delivered: &mut bool,
     h264: bool,
+    try_rtc: bool,
 ) -> Result<VideoEnd> {
     let metrics = std::env::var_os("HSX_METRICS").is_some();
     let mut report = VideoMetrics::default();
-    let (response, mut stream) = host.request(Request::View {
-        handle: info.handle,
-        process_id: info.process_id,
-        metrics,
-        h264,
-    })?;
+    let socket = host.addr.connect(Duration::from_secs(8))?;
+    let rtc = socket
+        .lan_ip()
+        .filter(|_| h264 && try_rtc)
+        .and_then(|ip| protocol::rtc::VideoPeer::offer(ip).ok());
+    let (response, stream) = host.request_on(
+        socket,
+        Request::View {
+            handle: info.handle,
+            process_id: info.process_id,
+            metrics,
+            h264,
+            rtc_offer: rtc.as_ref().map(|(_, offer, _)| offer.clone()),
+        },
+    )?;
     let mut encoder = None;
-    let mut decoder = match response {
-        Response::Streaming => None,
-        Response::StreamingH264 => Some(crate::h264::Decoder::default()),
+    let (mut decoder, mut rtc, mut stream) = match response {
+        Response::Streaming => (None, None, Some(stream)),
+        Response::StreamingH264 => (Some(crate::h264::Decoder::default()), None, Some(stream)),
+        Response::StreamingRtc { answer } => {
+            let Some((mut peer, _, pending)) = rtc else {
+                return Err("Resposta WebRTC inesperada".into());
+            };
+            if peer.accept_answer(pending, &answer).is_err() {
+                return Ok(VideoEnd::RtcUnavailable);
+            }
+            if metrics {
+                eprintln!("video window={} transport=webrtc", info.handle);
+            }
+            let control = monitor_rtc_control(stream);
+            (
+                Some(crate::h264::Decoder::default()),
+                Some((peer, control)),
+                None,
+            )
+        }
         _ => return Err("Resposta de captura inesperada".into()),
     };
+    let startup_deadline = Instant::now() + Duration::from_secs(4);
     while !updates.is_closed() {
         let packet = if let Some(h264_decoder) = &mut decoder {
-            if let Some(unit) = protocol::receive_h264_access_unit(&mut stream)? {
+            let unit = if let Some((peer, control)) = rtc.as_mut() {
+                if control.is_closed() || (!*delivered && Instant::now() >= startup_deadline) {
+                    return Ok(VideoEnd::RtcUnavailable);
+                }
+                match peer.poll() {
+                    Ok(Some(data)) => Some(data.data),
+                    Ok(None) => {
+                        thread::sleep(Duration::from_millis(2));
+                        None
+                    }
+                    Err(_) => return Ok(VideoEnd::RtcUnavailable),
+                }
+            } else {
+                protocol::receive_h264_access_unit(
+                    stream.as_mut().ok_or("Fluxo TLS indisponível")?,
+                )?
+                .map(Arc::from)
+            };
+            if let Some(unit) = unit {
+                let unit = unit.as_ref();
                 if unit == protocol::H264_SWITCH_TO_BGRA {
                     decoder = None;
                     encoder = None;
@@ -764,7 +820,7 @@ fn read_video(
                     continue;
                 }
                 let started = Instant::now();
-                let decoded = match h264_decoder.decode(&unit) {
+                let decoded = match h264_decoder.decode(unit) {
                     Ok(decoded) => decoded,
                     Err(error) => return Ok(VideoEnd::DecoderRejected(error)),
                 };
@@ -778,7 +834,7 @@ fn read_video(
                 None
             }
         } else {
-            Frame::receive_with_metrics(&mut stream)?
+            Frame::receive_with_metrics(stream.as_mut().ok_or("Fluxo TLS indisponível")?)?
         };
         if let Some(packet) = packet {
             if metrics {
@@ -811,6 +867,21 @@ fn read_video(
         }
     }
     Ok(VideoEnd::ViewClosed)
+}
+
+// The Windows host sends heartbeat packets on the authenticated control stream.
+fn monitor_rtc_control(
+    mut stream: StreamOwned<ClientConnection, Wire>,
+) -> async_channel::Receiver<()> {
+    let (keepalive, control) = async_channel::bounded(1);
+    thread::spawn(move || {
+        while !keepalive.is_closed() {
+            if !matches!(protocol::receive_h264_access_unit(&mut stream), Ok(None)) {
+                break;
+            }
+        }
+    });
+    control
 }
 
 struct VideoMetrics {
@@ -900,9 +971,10 @@ fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> 
         let mut has_opened = false;
         let mut retries = 0;
         let mut h264 = true;
+        let mut try_rtc = true;
         loop {
             let mut delivered = false;
-            let outcome = read_video(&host, &info, &sender, &mut delivered, h264);
+            let outcome = read_video(&host, &info, &sender, &mut delivered, h264, try_rtc);
             if sender.is_closed() {
                 break;
             }
@@ -912,6 +984,10 @@ fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> 
             }
             let error = match outcome {
                 Ok(VideoEnd::ViewClosed) => break,
+                Ok(VideoEnd::RtcUnavailable) => {
+                    try_rtc = false;
+                    continue;
+                }
                 Ok(VideoEnd::DecoderRejected(error)) if h264 => {
                     if std::env::var_os("HSX_METRICS").is_some() {
                         eprintln!("VideoToolbox: {error}. Tentando captura BGRA.");
@@ -1486,7 +1562,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn rejected_h264_reopens_the_window_stream_as_bgra() -> Result<()> {
+    fn rtc_video_falls_back_to_tls_and_recovers_from_rejected_h264() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = Endpoint::parse(&listener.local_addr()?.to_string())?;
         let (pairing, key) = protocol::new_identity()?;
@@ -1495,8 +1571,9 @@ mod tests {
             address,
             pairing: pairing.clone(),
         })?;
+        let (received_rtc, advance) = mpsc::sync_channel(1);
         let server = thread::spawn(move || -> Result<()> {
-            for h264 in [true, false] {
+            for (try_rtc, h264) in [(true, true), (false, true), (false, false)] {
                 let (socket, _) = listener.accept()?;
                 let mut stream = StreamOwned::new(
                     rustls::ServerConnection::new(config.clone())?,
@@ -1504,10 +1581,38 @@ mod tests {
                 );
                 let hello: Hello = protocol::receive(&mut stream)?;
                 hello.verify(&pairing)?;
-                assert!(
-                    matches!(hello.request, Request::View { h264: offered, .. } if offered == h264)
-                );
-                if h264 {
+                let Request::View {
+                    h264: offered,
+                    rtc_offer,
+                    ..
+                } = hello.request
+                else {
+                    panic!("expected video request");
+                };
+                assert_eq!((rtc_offer.is_some(), offered), (try_rtc, h264));
+                if let Some(offer) = rtc_offer {
+                    let ip = stream.sock.lan_ip().ok_or("no local IP")?;
+                    let (mut peer, answer) = protocol::rtc::VideoPeer::answer(ip, &offer)?;
+                    protocol::send(&mut stream, &Response::StreamingRtc { answer })?;
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let mut sent = false;
+                    loop {
+                        peer.poll()?;
+                        if !sent && peer.ready() {
+                            peer.send(
+                                include_bytes!("../../../tests/fixtures/red-32x24.h264").to_vec(),
+                            )?;
+                            sent = true;
+                        }
+                        if advance.try_recv().is_ok() {
+                            break;
+                        }
+                        if Instant::now() >= deadline {
+                            return Err("timed out waiting for RTC video".into());
+                        }
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                } else if h264 {
                     protocol::send(&mut stream, &Response::StreamingH264)?;
                     protocol::send_h264_access_unit(&mut stream, &[0, 0, 1, 0xff])?;
                 } else {
@@ -1532,9 +1637,16 @@ mod tests {
             },
         );
         let (observed, events) = mpsc::sync_channel(1);
-        let relay = thread::spawn(move || observed.send(updates.recv_blocking()));
-        let update = events.recv_timeout(Duration::from_secs(5))??;
-        assert!(matches!(update, Update::Image(frame) if (frame.width, frame.height) == (3, 2)));
+        let relay = thread::spawn(move || -> Result<()> {
+            for _ in 0..2 {
+                observed.send(updates.recv_blocking()?)?;
+            }
+            Ok(())
+        });
+        let next = || events.recv_timeout(Duration::from_secs(5));
+        assert!(matches!(next()?, Update::Image(frame) if (frame.width, frame.height) == (32, 24)));
+        received_rtc.send(())?;
+        assert!(matches!(next()?, Update::Image(frame) if (frame.width, frame.height) == (3, 2)));
         relay.join().expect("video update relay panicked")?;
         server.join().expect("test host panicked")?;
         Ok(())
