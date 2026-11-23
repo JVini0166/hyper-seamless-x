@@ -13,6 +13,8 @@ jobs:
       - run: rustup update stable
       - run: cargo test --locked -p protocol
       - run: cargo build --locked -p windows-host --release
+      - name: Verify ngrok endpoint discovery
+        run: cargo test --locked -p windows-host --release tunnel::tests
       - name: Exercise Media Foundation H.264
         shell: pwsh
         run: |
