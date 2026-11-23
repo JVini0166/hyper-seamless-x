@@ -764,6 +764,7 @@ struct RemoteView {
     input: async_channel::Sender<(Instant, protocol::InputEvent)>,
     focus: gpui::FocusHandle,
     scroll_remainder: (f64, f64),
+    drag_origin: Option<gpui::Point<gpui::Pixels>>,
     input_error: Option<String>,
 }
 
@@ -1259,6 +1260,7 @@ impl RemoteView {
             input,
             focus,
             scroll_remainder: (0., 0.),
+            drag_origin: None,
             input_error: None,
         }
     }
@@ -1511,11 +1513,33 @@ impl Render for RemoteView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event, _, cx| this.key_down(event, cx)))
             .on_scroll_wheel(cx.listener(|view, event, window, cx| view.scroll(event, window, cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|view, event: &gpui::MouseDownEvent, window, _| {
+                    view.drag_origin = view
+                        .pointer_position(event.position, window)
+                        .map(|_| event.position);
+                }),
+            )
             .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
-                    this.focus.focus(window);
-                    this.click(event.position, protocol::PointerButton::Left, window, cx);
+                cx.listener(|view, event: &gpui::MouseUpEvent, window, cx| {
+                    view.focus.focus(window);
+                    let Some(origin) = view.drag_origin.take() else {
+                        return;
+                    };
+                    let moved = (event.position.x - origin.x)
+                        .to_f64()
+                        .abs()
+                        .max((event.position.y - origin.y).to_f64().abs());
+                    if moved < 4.0 {
+                        view.click(event.position, protocol::PointerButton::Left, window, cx);
+                    } else if let (Some(from), Some(to)) = (
+                        view.pointer_position(origin, window),
+                        view.pointer_position(event.position, window),
+                    ) {
+                        view.queue(protocol::InputEvent::Drag { from, to }, cx);
+                    }
                 }),
             )
             .on_mouse_up(

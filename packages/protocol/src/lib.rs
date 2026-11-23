@@ -136,6 +136,10 @@ pub enum InputEvent {
     },
     Key(RemoteKey),
     Focus,
+    Drag {
+        from: (u16, u16),
+        to: (u16, u16),
+    },
 }
 
 #[derive(Serialize, Deserialize)]

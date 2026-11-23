@@ -263,6 +263,17 @@ fn serve_input(
             } => scroll_window(window, x, y, horizontal, vertical),
             InputEvent::Key(key) => send_key(window, key),
             InputEvent::Focus => focus_window(window),
+            InputEvent::Drag { from: (x, y), to } => {
+                use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+                pointer_window(
+                    window,
+                    x,
+                    y,
+                    &[(MOUSEEVENTF_LEFTDOWN, 0), (MOUSEEVENTF_LEFTUP, 0)],
+                    true,
+                    Some(to),
+                )
+            }
         };
         let response = match result {
             Ok(()) => Response::Controlled,
@@ -671,7 +682,7 @@ fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton)
         protocol::PointerButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
         protocol::PointerButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
     };
-    pointer_window(window, x, y, &[(flags.0, 0), (flags.1, 0)], true)
+    pointer_window(window, x, y, &[(flags.0, 0), (flags.1, 0)], true, None)
 }
 
 fn scroll_window(window: Window, x: u16, y: u16, horizontal: i16, vertical: i16) -> Result<()> {
@@ -688,7 +699,7 @@ fn scroll_window(window: Window, x: u16, y: u16, horizontal: i16, vertical: i16)
     if events.is_empty() {
         return Ok(());
     }
-    pointer_window(window, x, y, &events, false)
+    pointer_window(window, x, y, &events, false, None)
 }
 
 fn pointer_window(
@@ -697,6 +708,7 @@ fn pointer_window(
     y: u16,
     events: &[(u32, i32)],
     click: bool,
+    destination: Option<(u16, u16)>,
 ) -> Result<()> {
     use windows_sys::Win32::{
         Foundation::{POINT, RECT},
@@ -704,8 +716,9 @@ fn pointer_window(
         UI::{
             Input::KeyboardAndMouse::*,
             WindowsAndMessaging::{
-                GA_ROOT, GetAncestor, GetForegroundWindow, IsIconic, SetCursorPos,
-                SetForegroundWindow, WindowFromPoint,
+                GA_ROOT, GetAncestor, GetForegroundWindow, GetSystemMetrics, IsIconic,
+                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                SetCursorPos, SetForegroundWindow, WindowFromPoint,
             },
         },
     };
@@ -731,10 +744,11 @@ fn pointer_window(
             SetForegroundWindow(hwnd);
         }
         let offset = |value, length| (i64::from(value) * i64::from(length - 1) / 65535) as i32;
-        let point = POINT {
+        let window_point = |x, y| POINT {
             x: rect.left + offset(x, rect.right - rect.left),
             y: rect.top + offset(y, rect.bottom - rect.top),
         };
+        let point = window_point(x, y);
         if GetForegroundWindow() != hwnd || GetAncestor(WindowFromPoint(point), GA_ROOT) != hwnd {
             return Err("Traga a janela para frente no Windows".into());
         }
@@ -744,7 +758,7 @@ fn pointer_window(
         {
             return Err("O destino do ponteiro mudou".into());
         }
-        let inputs: Vec<_> = events
+        let mut inputs: Vec<_> = events
             .iter()
             .map(|&(flags, data)| INPUT {
                 r#type: INPUT_MOUSE,
@@ -757,14 +771,45 @@ fn pointer_window(
                 },
             })
             .collect();
+        if let Some((x, y)) = destination {
+            let end = window_point(x, y);
+            if GetAncestor(WindowFromPoint(end), GA_ROOT) != hwnd {
+                return Err("O destino do arraste está fora da janela".into());
+            }
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if width < 2 || height < 2 {
+                return Err("Área de trabalho virtual indisponível".into());
+            }
+            let absolute = |pixel: i32, origin: i32, length: i32| {
+                ((i64::from(pixel) - i64::from(origin)) * 65536 / i64::from(length)).clamp(0, 65535)
+                    as i32
+            };
+            inputs.insert(
+                1,
+                INPUT {
+                    r#type: INPUT_MOUSE,
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dx: absolute(end.x, GetSystemMetrics(SM_XVIRTUALSCREEN), width),
+                            dy: absolute(end.y, GetSystemMetrics(SM_YVIRTUALSCREEN), height),
+                            dwFlags: MOUSEEVENTF_MOVE
+                                | MOUSEEVENTF_ABSOLUTE
+                                | MOUSEEVENTF_VIRTUALDESK,
+                            ..Default::default()
+                        },
+                    },
+                },
+            );
+        }
         let sent = SendInput(
             inputs.len() as u32,
             inputs.as_ptr(),
             size_of::<INPUT>() as i32,
         );
         if sent != inputs.len() as u32 {
-            if click && sent == 1 {
-                SendInput(1, &inputs[1], size_of::<INPUT>() as i32);
+            if click && sent != 0 {
+                SendInput(1, &inputs[inputs.len() - 1], size_of::<INPUT>() as i32);
             }
             return Err("O Windows recusou a entrada do ponteiro".into());
         }
