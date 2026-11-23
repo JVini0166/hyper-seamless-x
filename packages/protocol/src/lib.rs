@@ -108,6 +108,8 @@ pub enum Request {
         h264: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rtc_offer: Option<String>,
+        #[serde(default)]
+        h264_metrics: bool,
     },
     Launch(LaunchApp),
     Input {
@@ -289,6 +291,25 @@ pub struct HostFrameMetrics {
     pub capture_micros: u32,
     pub encode_micros: u32,
     pub dropped: u32,
+}
+
+impl HostFrameMetrics {
+    pub fn h264_marker(self) -> [u8; 19] {
+        let mut marker = *b"HSX:MET\0\0\0\0\0\0\0\0\0\0\0\0";
+        marker[7..11].copy_from_slice(&self.capture_micros.to_be_bytes());
+        marker[11..15].copy_from_slice(&self.encode_micros.to_be_bytes());
+        marker[15..19].copy_from_slice(&self.dropped.to_be_bytes());
+        marker
+    }
+
+    pub fn from_h264_marker(packet: &[u8]) -> Option<Self> {
+        let values: &[u8; 12] = packet.strip_prefix(b"HSX:MET")?.try_into().ok()?;
+        Some(Self {
+            capture_micros: u32::from_be_bytes(values[0..4].try_into().ok()?),
+            encode_micros: u32::from_be_bytes(values[4..8].try_into().ok()?),
+            dropped: u32::from_be_bytes(values[8..12].try_into().ok()?),
+        })
+    }
 }
 
 pub struct ReceivedFrame {

@@ -811,9 +811,11 @@ fn read_video(
             metrics,
             h264,
             rtc_offer: rtc.as_ref().map(|(_, offer, _)| offer.clone()),
+            h264_metrics: metrics,
         },
     )?;
     let mut encoder = None;
+    let mut host_metrics = None;
     let (mut decoder, mut rtc, mut stream) = match response {
         Response::Streaming => (None, None, Some(stream)),
         Response::StreamingH264 => (Some(crate::h264::Decoder::default()), None, Some(stream)),
@@ -889,6 +891,10 @@ fn read_video(
                     encoder = Some(mode);
                     continue;
                 }
+                if let Some(sample) = protocol::HostFrameMetrics::from_h264_marker(unit) {
+                    host_metrics = Some(sample);
+                    continue;
+                }
                 let started = Instant::now();
                 let decoded = match h264_decoder.decode(unit) {
                     Ok(decoded) => decoded,
@@ -896,7 +902,7 @@ fn read_video(
                 };
                 decoded.map(|frame| protocol::ReceivedFrame {
                     frame,
-                    host_metrics: None,
+                    host_metrics: host_metrics.take(),
                     compressed_bytes: unit.len(),
                     decode_micros: protocol::duration_micros(started.elapsed()),
                 })

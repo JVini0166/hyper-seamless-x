@@ -292,3 +292,31 @@ fn graceful_video_finish_is_distinct_from_a_dropped_transport() -> protocol::Res
     );
     Ok(())
 }
+
+#[test]
+fn h264_metrics_marker_round_trips_without_consuming_the_picture() -> protocol::Result<()> {
+    let sample = protocol::HostFrameMetrics {
+        capture_micros: 460,
+        encode_micros: 5_600,
+        dropped: 3,
+    };
+    let picture = include_bytes!("fixtures/red-32x24.h264");
+    let mut wire = Vec::new();
+    protocol::send_h264_access_unit(&mut wire, &sample.h264_marker())?;
+    protocol::send_h264_access_unit(&mut wire, picture)?;
+    let mut reader = Cursor::new(wire);
+    let marker = protocol::receive_h264_access_unit(&mut reader)?.expect("metrics marker");
+    let decoded = protocol::HostFrameMetrics::from_h264_marker(&marker).expect("host metrics");
+    assert_eq!(
+        (
+            decoded.capture_micros,
+            decoded.encode_micros,
+            decoded.dropped
+        ),
+        (460, 5_600, 3)
+    );
+    let next = protocol::receive_h264_access_unit(&mut reader)?.expect("H.264 picture");
+    assert_eq!(next.as_slice(), picture);
+    assert!(protocol::HostFrameMetrics::from_h264_marker(&next).is_none());
+    Ok(())
+}

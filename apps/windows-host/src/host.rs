@@ -194,6 +194,7 @@ fn handle(
             metrics,
             h264,
             rtc_offer,
+            h264_metrics,
         } => match find_window(handle, process_id)? {
             Some(window) => {
                 let rtc = stream
@@ -202,7 +203,7 @@ fn handle(
                     .zip(rtc_offer.as_deref())
                     .filter(|_| h264)
                     .and_then(|(ip, offer)| protocol::rtc::VideoPeer::answer(ip, offer).ok());
-                capture(window, &mut stream, stop, metrics, h264, rtc)
+                capture(window, &mut stream, stop, metrics, h264, h264_metrics, rtc)
             }
             None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
         },
@@ -321,7 +322,7 @@ struct CaptureQueue {
 
 enum CapturedPacket {
     Raw(Frame, u32),
-    H264(Vec<u8>),
+    H264(Vec<u8>, u32),
 }
 
 type Latest = Arc<CaptureQueue>;
@@ -401,8 +402,10 @@ impl GraphicsCaptureApiHandler for Capture {
                         .latest
                         .newest
                         .lock()
-                        .map_err(|_| "Fila de captura indisponível")? =
-                        Some(CapturedPacket::H264(unit));
+                        .map_err(|_| "Fila de captura indisponível")? = Some(CapturedPacket::H264(
+                        unit,
+                        protocol::duration_micros(started.elapsed()),
+                    ));
                     self.last = Instant::now();
                     return Ok(());
                 }
@@ -474,6 +477,7 @@ fn capture(
     stop: &AtomicBool,
     metrics: bool,
     h264: bool,
+    h264_metrics: bool,
     rtc: Option<(protocol::rtc::VideoPeer, String)>,
 ) -> Result<()> {
     let mut rtc = if let Some((mut peer, answer)) = rtc {
@@ -555,7 +559,8 @@ fn capture(
                 .lock()
                 .map_err(|_| "Fila de captura indisponível")?
                 .take();
-            if let Some(CapturedPacket::H264(unit)) = frame {
+            if let Some(CapturedPacket::H264(unit, encode_micros)) = frame {
+                let dropped = latest.dropped.swap(0, Ordering::Relaxed);
                 if let Some(peer) = rtc.as_mut() {
                     peer.send(unit)?;
                     continue;
@@ -569,6 +574,11 @@ fn capture(
                     &unit,
                     protocol::EncoderMode::NvencGpuCopy,
                     metrics,
+                    h264_metrics.then_some(protocol::HostFrameMetrics {
+                        capture_micros: 0,
+                        encode_micros,
+                        dropped,
+                    }),
                     &mut last_encoder,
                 )?;
                 last_write = Instant::now();
@@ -581,6 +591,7 @@ fn capture(
                         encoder = None;
                     }
                     let bitrate_limit = latest.bitrate_limit.load(Ordering::Relaxed);
+                    let encode_start = Instant::now();
                     let encoded = encode_h264_frame(&mut encoder, &frame, bitrate_limit);
                     match encoded {
                         Ok((unit, mode)) => {
@@ -592,7 +603,20 @@ fn capture(
                                 protocol::send(stream, &Response::StreamingH264)?;
                                 announced = true;
                             }
-                            send_h264(stream, &unit, mode, metrics, &mut last_encoder)?;
+                            send_h264(
+                                stream,
+                                &unit,
+                                mode,
+                                metrics,
+                                h264_metrics.then_some(protocol::HostFrameMetrics {
+                                    capture_micros,
+                                    encode_micros: protocol::duration_micros(
+                                        encode_start.elapsed(),
+                                    ),
+                                    dropped,
+                                }),
+                                &mut last_encoder,
+                            )?;
                             last_write = Instant::now();
                             continue;
                         }
@@ -662,11 +686,15 @@ fn send_h264(
     unit: &[u8],
     mode: protocol::EncoderMode,
     metrics: bool,
+    frame_metrics: Option<protocol::HostFrameMetrics>,
     last: &mut Option<protocol::EncoderMode>,
 ) -> Result<()> {
     if metrics && *last != Some(mode) {
         protocol::send_h264_access_unit(stream, mode.marker())?;
         *last = Some(mode);
+    }
+    if let Some(metrics) = frame_metrics {
+        protocol::send_h264_access_unit(stream, &metrics.h264_marker())?;
     }
     protocol::send_h264_access_unit(stream, unit)
 }
