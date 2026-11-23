@@ -36,11 +36,61 @@ pub fn run() {
     });
 }
 
+struct Advertisement {
+    daemon: mdns_sd::ServiceDaemon,
+    fullname: String,
+}
+
+impl Advertisement {
+    fn start(address: SocketAddr) -> protocol::Result<Self> {
+        let computer = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows".into());
+        let name: String = computer
+            .chars()
+            .take(35)
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let ip = address.ip();
+        let suffix = ip.to_string().replace('.', "-");
+        let hostname = format!("hsx-{name}-{suffix}.local.");
+        let version = protocol::VERSION.to_string();
+        let mut service = mdns_sd::ServiceInfo::new(
+            protocol::DISCOVERY_SERVICE,
+            &name,
+            &hostname,
+            ip,
+            address.port(),
+            &[("version", version.as_str())][..],
+        )?;
+        service.set_interfaces(vec![mdns_sd::IfKind::Addr(ip)]);
+        let fullname = service.get_fullname().to_owned();
+        let daemon = mdns_sd::ServiceDaemon::new()?;
+        if let Err(error) = daemon.register(service) {
+            let _ = daemon.shutdown();
+            return Err(error.into());
+        }
+        Ok(Self { daemon, fullname })
+    }
+}
+
+impl Drop for Advertisement {
+    fn drop(&mut self) {
+        let _ = self.daemon.unregister(&self.fullname);
+        let _ = self.daemon.shutdown();
+    }
+}
+
 struct Sharing {
     server: host::Server,
     address: SocketAddr,
     state: PairingState,
     _watch: Task<()>,
+    _advertisement: Option<Advertisement>,
 }
 
 struct HostPanel {
@@ -99,7 +149,21 @@ impl HostPanel {
                 } else {
                     format!("Compartilhando em {address}")
                 };
+                let advertisement = if ip.is_loopback() {
+                    None
+                } else {
+                    match Advertisement::start(address) {
+                        Ok(advertisement) => Some(advertisement),
+                        Err(error) => {
+                            self.status = format!(
+                                "Compartilhando em {address} · descoberta indisponível: {error}"
+                            );
+                            None
+                        }
+                    }
+                };
                 self.sharing = Some(Sharing {
+                    _advertisement: advertisement,
                     server,
                     address,
                     state: PairingState::Closed,

@@ -4,6 +4,10 @@
 - `apps/macos-client` usa GPUI para o launcher e uma janela nativa por transmissão. A leitura e descompressão executam fora da thread da interface. O primeiro quadro determina as dimensões iniciais, ajustadas à escala do monitor e à área útil disponível.
 - `packages/protocol` contém os transportes TCP e WebSocket e as mensagens versionadas de autenticação, pareamento e vídeo.
 
+## Descoberta local
+
+Ao compartilhar por um endereço da LAN, o host anuncia o serviço `_hyper-seamless._tcp.local.` via DNS-SD/mDNS na interface escolhida. O modo de túnel local dispensa o anúncio. O launcher lista os anúncios com a mesma versão do protocolo e conserva o endereço manual para redes onde multicast não chega. O anúncio contém o nome do host, endereço, porta e versão. O pareamento autenticado continua obrigatório.
+
 ## Sessão e pareamento
 
 O host abre uma janela de pareamento de 90 segundos mediante ação local. Ele aceita apenas um pedido pendente e aguarda aprovação do usuário no Windows. Os dois aplicativos derivam um código de oito dígitos do exportador de chaves TLS, vinculado ao handshake. As duas confirmações por interface precedem o uso da identidade pelo Mac. O certificado armazenado deve corresponder ao certificado da sessão de pareamento. Conexões posteriores validam o certificado armazenado e enviam o token aleatório de 32 bytes antes de solicitar operações.

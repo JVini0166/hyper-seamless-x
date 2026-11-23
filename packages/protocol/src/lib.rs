@@ -9,6 +9,7 @@ use std::io::{self, Read, Write};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
+pub const DISCOVERY_SERVICE: &str = "_hyper-seamless._tcp.local.";
 pub const DEFAULT_PORT: u16 = 47651;
 pub const VERSION: u16 = 2;
 pub const SERVER_NAME: &str = "hyper-seamless-x.local";

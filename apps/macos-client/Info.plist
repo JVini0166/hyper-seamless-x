@@ -10,6 +10,8 @@
     <key>CFBundleShortVersionString</key><string>0.2.0</string>
     <key>CFBundleVersion</key><string>2</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSBonjourServices</key>
+    <array><string>_hyper-seamless._tcp</string></array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Conecta ao computador Windows pareado para receber suas janelas pela rede local.</string>
 </dict>

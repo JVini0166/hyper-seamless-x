@@ -13,8 +13,9 @@ use protocol::{
 };
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
     thread,
@@ -160,6 +161,8 @@ pub fn run() -> Result<()> {
                     task: None,
                     enrollment: None,
                     _enter: enter,
+                    discovered: BTreeMap::new(),
+                    _discovery: watch_discovery(cx),
                 };
                 launcher.refresh(None, cx);
                 launcher
@@ -204,6 +207,67 @@ struct Launcher {
     task: Option<Task<()>>,
     enrollment: Option<Enrollment>,
     _enter: Subscription,
+    discovered: BTreeMap<String, (String, SocketAddr)>,
+    _discovery: Option<Task<()>>,
+}
+
+struct Discovery(mdns_sd::ServiceDaemon);
+
+impl Drop for Discovery {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown();
+    }
+}
+
+fn watch_discovery(cx: &Context<Launcher>) -> Option<Task<()>> {
+    use mdns_sd::ServiceEvent;
+    let daemon = Discovery(mdns_sd::ServiceDaemon::new().ok()?);
+    let events = daemon.0.browse(protocol::DISCOVERY_SERVICE).ok()?;
+    Some(cx.spawn(async move |view, cx| {
+        let _daemon = daemon;
+        let version = VERSION.to_string();
+        while let Ok(event) = events.recv_async().await {
+            let updated = view.update(cx, |view, cx| match event {
+                ServiceEvent::ServiceResolved(service) => {
+                    if service.get_property_val_str("version") != Some(version.as_str())
+                        || service.get_port() == 0
+                    {
+                        return;
+                    }
+                    let Some(ip) = service
+                        .get_addresses_v4()
+                        .into_iter()
+                        .filter(|ip| {
+                            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast()
+                        })
+                        .min()
+                    else {
+                        return;
+                    };
+                    let key = service.get_fullname();
+                    if view.discovered.len() < 32 || view.discovered.contains_key(key) {
+                        view.discovered.insert(
+                            key.to_owned(),
+                            (
+                                mdns_sd::instance_name_unescaped(key),
+                                SocketAddr::from((ip, service.get_port())),
+                            ),
+                        );
+                        cx.notify();
+                    }
+                }
+                ServiceEvent::ServiceRemoved(_, key) => {
+                    if view.discovered.remove(&key).is_some() {
+                        cx.notify();
+                    }
+                }
+                _ => {}
+            });
+            if updated.is_err() {
+                break;
+            }
+        }
+    }))
 }
 
 impl Launcher {
@@ -446,6 +510,58 @@ impl Render for Launcher {
                         button("connect", "Conectar")
                             .on_click(cx.listener(|view, _, _, cx| view.connect(cx))),
                     ),
+            )
+            .when(
+                self.host.is_none() && self.enrollment.is_none() && !self.discovered.is_empty(),
+                |view| {
+                    view.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0xa5b5c9))
+                                    .child("Hosts na rede local"),
+                            )
+                            .child(
+                                div()
+                                    .id("lan-hosts")
+                                    .max_h(px(190.))
+                                    .overflow_y_scroll()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .children(self.discovered.iter().map(
+                                        |(key, (name, address))| {
+                                            let address = *address;
+                                            div()
+                                                .id(gpui::SharedString::from(format!("lan-{key}")))
+                                                .rounded_md()
+                                                .px_3()
+                                                .py_2()
+                                                .cursor_pointer()
+                                                .bg(rgb(0x1a2432))
+                                                .hover(|style| style.bg(rgb(0x26374b)))
+                                                .child(format!("{name} · {address}"))
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.address.update(cx, |field, cx| {
+                                                            field.set_value(
+                                                                address.to_string(),
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
+                                                        this.connect(cx);
+                                                    },
+                                                ))
+                                        },
+                                    )),
+                            ),
+                    )
+                },
             )
             .when_some(self.enrollment.as_ref(), |view, enrollment| {
                 view.child(

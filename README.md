@@ -7,7 +7,7 @@ Aplicativos em Rust e GPUI para abrir janelas individuais de um PC Windows 11 no
 Baixe a mesma versão do host para Windows x64 e do cliente para Mac Apple Silicon na página de [releases](https://github.com/JVini0166/hyper-seamless-x/releases). O executável Windows está sem assinatura e o aplicativo Mac usa assinatura ad hoc.
 
 1. No Windows, abra o host e selecione o endereço da sua rede local. Se o Firewall solicitar acesso, autorize no perfil privado.
-2. Clique em **Autorizar novo Mac**. No Mac, digite ou cole o endereço e clique em **Conectar**.
+2. Clique em **Autorizar novo Mac**. No Mac, selecione o host em **Hosts na rede local** ou digite o endereço e clique em **Conectar**.
 3. Confira o código exibido nos dois computadores. Clique em **Aprovar Mac** no Windows e confirme a comparação no Mac. O cliente guarda a identidade para as próximas conexões.
 4. Clique em uma janela para abrir a transmissão. Ela abre com a proporção do quadro capturado e é reduzida se ultrapassar a área útil da tela.
 5. Passe o cursor pela borda superior da transmissão para revelar os três botões nativos do macOS. O conteúdo capturado preserva a aparência do aplicativo Windows.
@@ -33,6 +33,6 @@ Use Rust estável e o toolchain MSVC com as ferramentas de build C++ do Visual S
 
 ## Estado
 
-O fluxo de vídeo experimental usa BGRA com Zstandard por TCP ou WebSocket e captura limitada a cerca de 30 quadros por segundo. A transmissão aceita cliques esquerdo e direito quando a janela pode receber foco no Windows. Com a janela em primeiro plano, aceita texto e teclas de navegação. A rolagem do trackpad é encaminhada nos dois eixos. Após uma interrupção de rede, janelas abertas tentam retomar a transmissão automaticamente. Arraste, atalhos com modificadores, sincronização automática da geometria das janelas, descoberta mDNS, bandeja do Windows e o pipeline WebRTC/H.264 com aceleração por hardware ainda estão pendentes. As metas de latência, resolução e FPS exigem medições.
+O fluxo de vídeo experimental usa BGRA com Zstandard por TCP ou WebSocket e captura limitada a cerca de 30 quadros por segundo. A transmissão aceita cliques esquerdo e direito quando a janela pode receber foco no Windows. Com a janela em primeiro plano, aceita texto e teclas de navegação. A rolagem do trackpad é encaminhada nos dois eixos. Após uma interrupção de rede, janelas abertas tentam retomar a transmissão automaticamente. Arraste, atalhos com modificadores, sincronização automática da geometria das janelas, bandeja do Windows e o pipeline WebRTC/H.264 com aceleração por hardware ainda estão pendentes. As metas de latência, resolução e FPS exigem medições.
 
 [Arquitetura e procedimento de validação](docs/architecture.md).
