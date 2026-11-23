@@ -218,7 +218,7 @@ mod tests {
         let (mut client, offer, pending) = VideoPeer::offer(ip, true)?;
         let (mut host, answer) = VideoPeer::answer(ip, &offer)?;
         client.accept_answer(pending, &answer)?;
-        let sample = include_bytes!("../../../tests/fixtures/red-32x24.h264");
+        let sample = include_bytes!("../../../tests/fixtures/blue-4096x2160.h264");
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut sent = false;
         let mut requested = false;
@@ -226,6 +226,10 @@ mod tests {
         while Instant::now() < deadline {
             host.poll()?;
             if let Some(frame) = client.poll()? {
+                assert!(
+                    frame.data.len() > 20_000,
+                    "fragmented 4K access unit was truncated"
+                );
                 assert!(
                     frame
                         .data

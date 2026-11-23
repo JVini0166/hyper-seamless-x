@@ -202,6 +202,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decodes_full_width_4k_h264_at_the_capture_limit() -> Result<()> {
+        let sample = include_bytes!("../../../tests/fixtures/blue-4096x2160.h264");
+        let mut decoder = Decoder::default();
+        let frame = decoder.decode(sample)?.expect("missing 4K picture");
+        assert_eq!((frame.width, frame.height), (4096, 2160));
+        assert_eq!(frame.bgra.len(), protocol::MAX_PIXELS * 4);
+        for offset in [0, frame.bgra.len() / 2, frame.bgra.len() - 4] {
+            let pixel = &frame.bgra[offset..offset + 4];
+            assert!(pixel[0] > 200 && pixel[1] < 25 && pixel[2] < 25);
+        }
+        eprintln!("4K H.264 decoder: {:?}", decoder.mode());
+        Ok(())
+    }
+
+    #[test]
     fn decodes_h264_annex_b_with_video_toolbox() -> Result<()> {
         let sample = include_bytes!("../../../tests/fixtures/red-32x24.h264");
         let mut decoder = Decoder::default();
