@@ -100,31 +100,31 @@ pub enum Request {
         process_id: u32,
     },
     Launch(LaunchApp),
-    Click {
+    Input {
         handle: u64,
         process_id: u32,
-        x: u16,
-        y: u16,
-        button: PointerButton,
-    },
-    Scroll {
-        handle: u64,
-        process_id: u32,
-        x: u16,
-        y: u16,
-        horizontal: i16,
-        vertical: i16,
-    },
-    Key {
-        handle: u64,
-        process_id: u32,
-        key: RemoteKey,
     },
     Control {
         handle: u64,
         process_id: u32,
         action: WindowAction,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum InputEvent {
+    Click {
+        x: u16,
+        y: u16,
+        button: PointerButton,
+    },
+    Scroll {
+        x: u16,
+        y: u16,
+        horizontal: i16,
+        vertical: i16,
+    },
+    Key(RemoteKey),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -171,6 +171,7 @@ pub enum Response {
     Paired(Pairing),
     Windows(Vec<WindowInfo>),
     Streaming,
+    InputReady,
     Launched,
     Controlled,
     Error(String),

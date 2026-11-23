@@ -192,53 +192,7 @@ fn handle(
             Some(window) => capture(window, &mut stream, stop),
             None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
         },
-        Request::Click {
-            handle,
-            process_id,
-            x,
-            y,
-            button,
-        } => {
-            let result = find_window(handle, process_id)?
-                .ok_or_else(|| protocol::Error::from("Janela indisponível"))
-                .and_then(|window| click_window(window, x, y, button));
-            let response = match result {
-                Ok(()) => Response::Controlled,
-                Err(error) => Response::Error(error.to_string()),
-            };
-            protocol::send(&mut stream, &response)
-        }
-        Request::Scroll {
-            handle,
-            process_id,
-            x,
-            y,
-            horizontal,
-            vertical,
-        } => {
-            let result = find_window(handle, process_id)?
-                .ok_or_else(|| protocol::Error::from("Janela indisponível"))
-                .and_then(|window| scroll_window(window, x, y, horizontal, vertical));
-            let response = match result {
-                Ok(()) => Response::Controlled,
-                Err(error) => Response::Error(error.to_string()),
-            };
-            protocol::send(&mut stream, &response)
-        }
-        Request::Key {
-            handle,
-            process_id,
-            key,
-        } => {
-            let result = find_window(handle, process_id)?
-                .ok_or_else(|| protocol::Error::from("Janela indisponível"))
-                .and_then(|window| send_key(window, key));
-            let response = match result {
-                Ok(()) => Response::Controlled,
-                Err(error) => Response::Error(error.to_string()),
-            };
-            protocol::send(&mut stream, &response)
-        }
+        Request::Input { handle, process_id } => serve_input(&mut stream, handle, process_id, stop),
         Request::Control {
             handle,
             process_id,
@@ -254,6 +208,39 @@ fn handle(
             protocol::send(&mut stream, &response)
         }
     }
+}
+
+fn serve_input(stream: &mut Stream, handle: u64, process_id: u32, stop: &AtomicBool) -> Result<()> {
+    use protocol::InputEvent;
+    if find_window(handle, process_id)?.is_none() {
+        return protocol::send(stream, &Response::Error("Janela indisponível".into()));
+    }
+    protocol::send(stream, &Response::InputReady)?;
+    while !stop.load(Ordering::Acquire) {
+        let event: InputEvent = protocol::receive(stream)?;
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let Some(window) = find_window(handle, process_id)? else {
+            return protocol::send(stream, &Response::Error("Janela indisponível".into()));
+        };
+        let result = match event {
+            InputEvent::Click { x, y, button } => click_window(window, x, y, button),
+            InputEvent::Scroll {
+                x,
+                y,
+                horizontal,
+                vertical,
+            } => scroll_window(window, x, y, horizontal, vertical),
+            InputEvent::Key(key) => send_key(window, key),
+        };
+        let response = match result {
+            Ok(()) => Response::Controlled,
+            Err(error) => Response::Error(error.to_string()),
+        };
+        protocol::send(stream, &response)?;
+    }
+    Ok(())
 }
 
 fn find_window(handle: u64, process_id: u32) -> Result<Option<Window>> {

@@ -12,7 +12,7 @@ O host usa uma identidade persistente. Para revogar o acesso de todos os cliente
 
 O host aceita TLS diretamente na porta TCP ou dentro de mensagens WebSocket binárias em `/hyper-seamless-x`. Para túnel HTTP ou HTTPS, execute o agente de túnel no Windows e aponte para `127.0.0.1:47651` enquanto o host estiver no modo **Usar túnel local**. Para um agente TCP, cole o endereço TCP atribuído pelo serviço no cliente.
 
-Mensagens JSON têm um prefixo de tamanho de 32 bits em ordem de rede. Após a confirmação de captura o fluxo contém pacotes binários. Cada quadro traz largura e altura em ordem de rede seguidas por BGRA comprimido em Zstandard. Um pacote vazio mantém a sessão ativa em janelas estáticas. Cada conexão serve uma operação. A captura exige um HWND e o PID correspondente, conferidos contra a lista atual.
+Mensagens JSON têm um prefixo de tamanho de 32 bits em ordem de rede. Após a confirmação de captura o fluxo contém pacotes binários. Cada quadro traz largura e altura em ordem de rede seguidas por BGRA comprimido em Zstandard. Um pacote vazio mantém a sessão ativa em janelas estáticas. Uma sessão TLS autenticada e vinculada à janela confirma eventos de entrada em ordem. O cliente reabre a sessão após inatividade, descarta eventos antigos da fila e evita reenviar comandos cujo sucesso seja incerto. A captura exige um HWND e o PID correspondente, conferidos contra a lista atual.
 
 ## Validação em dois computadores
 

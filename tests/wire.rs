@@ -2,66 +2,97 @@ use protocol::{Frame, Hello, Request, VERSION};
 use std::{io::Cursor, sync::Arc};
 
 #[test]
-fn tls_pairing_authenticates_and_rejects_wrong_token() -> protocol::Result<()> {
+fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result<()> {
+    use protocol::{InputEvent, PointerButton, RemoteKey, Response};
+    use std::{
+        net::{TcpListener, TcpStream},
+        time::Duration,
+    };
     let (pairing, key) = protocol::new_identity()?;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let config = Arc::new(pairing.server_config(key)?);
     let host_pairing = pairing.clone();
     let server = std::thread::spawn(move || -> protocol::Result<()> {
-        let (socket, _) = listener.accept()?;
-        let connection = rustls::ServerConnection::new(config)?;
-        let mut stream = rustls::StreamOwned::new(connection, socket);
-        let hello: Hello = protocol::receive(&mut stream)?;
-        hello.verify(&host_pairing)?;
-        assert!(matches!(
-            hello.request,
-            Request::Click {
-                handle: 42,
-                process_id: 7,
-                x: 123,
-                y: 456,
-                button: protocol::PointerButton::Right,
+        for should_accept in [false, true] {
+            let (socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut stream =
+                rustls::StreamOwned::new(rustls::ServerConnection::new(config.clone())?, socket);
+            let hello: Hello = protocol::receive(&mut stream)?;
+            assert!(matches!(
+                hello.request,
+                Request::Input {
+                    handle: 42,
+                    process_id: 7
+                }
+            ));
+            if !should_accept {
+                assert!(hello.verify(&host_pairing).is_err());
+                continue;
             }
-        ));
-        let key: Hello = protocol::receive(&mut stream)?;
-        key.verify(&host_pairing)?;
-        assert!(matches!(key.request, Request::Key {
-            handle: 42, process_id: 7, key: protocol::RemoteKey::Text(text),
-        } if text == "ação"));
-        let invalid: Hello = protocol::receive(&mut stream)?;
-        assert!(invalid.verify(&host_pairing).is_err());
-        protocol::send(&mut stream, &protocol::Response::Launched)
+            hello.verify(&host_pairing)?;
+            protocol::send(&mut stream, &Response::InputReady)?;
+            let click: InputEvent = protocol::receive(&mut stream)?;
+            assert!(matches!(
+                click,
+                InputEvent::Click {
+                    x: 123,
+                    y: 456,
+                    button: PointerButton::Right
+                }
+            ));
+            protocol::send(&mut stream, &Response::Controlled)?;
+            let key: InputEvent = protocol::receive(&mut stream)?;
+            assert!(matches!(key, InputEvent::Key(RemoteKey::Text(text)) if text == "ação"));
+            protocol::send(&mut stream, &Response::Controlled)?;
+        }
+        Ok(())
     });
-    let socket = std::net::TcpStream::connect(addr)?;
-    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
-    let conn = rustls::ClientConnection::new(
-        Arc::new(pairing.client_config()?),
-        protocol::SERVER_NAME.try_into()?,
-    )?;
-    let mut stream = rustls::StreamOwned::new(conn, socket);
-    let mut hello = Hello {
-        version: VERSION,
-        token: pairing.token,
-        request: Request::Click {
-            handle: 42,
-            process_id: 7,
+    let connect = |token| -> protocol::Result<_> {
+        let socket = TcpStream::connect(addr)?;
+        socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let conn = rustls::ClientConnection::new(
+            Arc::new(pairing.client_config()?),
+            protocol::SERVER_NAME.try_into()?,
+        )?;
+        let mut stream = rustls::StreamOwned::new(conn, socket);
+        protocol::send(
+            &mut stream,
+            &Hello {
+                version: VERSION,
+                token,
+                request: Request::Input {
+                    handle: 42,
+                    process_id: 7,
+                },
+            },
+        )?;
+        Ok(stream)
+    };
+    let mut invalid_token = pairing.token;
+    invalid_token[0] ^= 1;
+    assert!(protocol::receive::<Response>(&mut connect(invalid_token)?).is_err());
+
+    let mut stream = connect(pairing.token)?;
+    assert!(matches!(
+        protocol::receive::<Response>(&mut stream)?,
+        Response::InputReady
+    ));
+    for event in [
+        InputEvent::Click {
             x: 123,
             y: 456,
-            button: protocol::PointerButton::Right,
+            button: PointerButton::Right,
         },
-    };
-    protocol::send(&mut stream, &hello)?;
-    hello.request = Request::Key {
-        handle: 42,
-        process_id: 7,
-        key: protocol::RemoteKey::Text("ação".into()),
-    };
-    protocol::send(&mut stream, &hello)?;
-    hello.token[0] ^= 1;
-    protocol::send(&mut stream, &hello)?;
-    let response: protocol::Response = protocol::receive(&mut stream)?;
-    assert!(matches!(response, protocol::Response::Launched));
+        InputEvent::Key(RemoteKey::Text("ação".into())),
+    ] {
+        protocol::send(&mut stream, &event)?;
+        assert!(matches!(
+            protocol::receive::<Response>(&mut stream)?,
+            Response::Controlled
+        ));
+    }
     server.join().expect("host thread panicked")?;
     Ok(())
 }

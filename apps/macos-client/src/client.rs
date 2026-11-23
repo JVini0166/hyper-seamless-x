@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone)]
@@ -543,14 +543,51 @@ impl Render for Launcher {
     }
 }
 
+struct InputSession {
+    host: Host,
+    target: (u64, u32),
+    stream: Option<(Instant, StreamOwned<ClientConnection, Wire>)>,
+}
+
+impl InputSession {
+    fn send(&mut self, queued: Instant, event: protocol::InputEvent) -> Result<()> {
+        // The host expires idle readers after five seconds. Reconnect before that
+        // threshold, and never replay an event after a write may have succeeded.
+        let mut stream = match self.stream.take() {
+            Some((last, stream)) if last.elapsed() < Duration::from_secs(3) => stream,
+            _ => {
+                let (handle, process_id) = self.target;
+                let (response, stream) =
+                    self.host.request(Request::Input { handle, process_id })?;
+                if !matches!(response, Response::InputReady) {
+                    return Err("Resposta de canal de entrada inesperada".into());
+                }
+                stream
+            }
+        };
+        let sent_at = Instant::now();
+        if sent_at.duration_since(queued) >= Duration::from_secs(1) {
+            self.stream = Some((sent_at, stream));
+            return Err("Entrada descartada após atraso na conexão".into());
+        }
+        protocol::send(&mut stream, &event)?;
+        let response = protocol::receive(&mut stream)?;
+        self.stream = Some((sent_at, stream));
+        match response {
+            Response::Controlled => Ok(()),
+            Response::Error(message) => Err(message.into()),
+            _ => Err("Resposta de entrada inesperada".into()),
+        }
+    }
+}
+
 struct RemoteView {
     frame: Option<VideoFrame>,
     status: SharedString,
     _task: Task<()>,
     _chrome_task: Task<()>,
     _input_task: Task<()>,
-    input: async_channel::Sender<Request>,
-    target: (u64, u32),
+    input: async_channel::Sender<(Instant, protocol::InputEvent)>,
     focus: gpui::FocusHandle,
     scroll_remainder: (f64, f64),
     input_error: Option<String>,
@@ -623,22 +660,36 @@ impl RemoteView {
         let target = (info.handle, info.process_id);
         let focus = cx.focus_handle();
         focus.focus(window);
-        let (input, requests) = async_channel::bounded(16);
+        let (input, requests) = async_channel::bounded::<(Instant, protocol::InputEvent)>(16);
+        let (results, feedback) = async_channel::bounded(1);
+        thread::spawn(move || {
+            let mut session = InputSession {
+                host,
+                target,
+                stream: None,
+            };
+            while let Ok((queued, event)) = requests.recv_blocking() {
+                if queued.elapsed() >= Duration::from_secs(1) {
+                    continue;
+                }
+                if results
+                    .force_send(
+                        session
+                            .send(queued, event)
+                            .err()
+                            .map(|error| error.to_string()),
+                    )
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let input_task = cx.spawn(async move |view, cx| {
-            while let Ok(request) = requests.recv().await {
-                let host = host.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        match host.request(request)?.0 {
-                            Response::Controlled => Ok(()),
-                            _ => Err(protocol::Error::from("Resposta de entrada inesperada")),
-                        }
-                    })
-                    .await;
+            while let Ok(error) = feedback.recv().await {
                 if view
                     .update(cx, |view, cx| {
-                        view.input_error = result.err().map(|error| error.to_string());
+                        view.input_error = error;
                         cx.notify();
                     })
                     .is_err()
@@ -699,7 +750,6 @@ impl RemoteView {
             _chrome_task: chrome_task,
             _input_task: input_task,
             input,
-            target,
             focus,
             scroll_remainder: (0., 0.),
             input_error: None,
@@ -813,17 +863,7 @@ impl RemoteView {
         cx: &mut Context<Self>,
     ) {
         if let Some((x, y)) = self.pointer_position(position, window) {
-            let (handle, process_id) = self.target;
-            self.queue(
-                Request::Click {
-                    handle,
-                    process_id,
-                    x,
-                    y,
-                    button,
-                },
-                cx,
-            );
+            self.queue(protocol::InputEvent::Click { x, y, button }, cx);
         }
     }
 
@@ -867,11 +907,8 @@ impl RemoteView {
         let horizontal = wheel_steps(&mut self.scroll_remainder.0, -delta.x.to_f64());
         let vertical = wheel_steps(&mut self.scroll_remainder.1, delta.y.to_f64());
         if horizontal != 0 || vertical != 0 {
-            let (handle, process_id) = self.target;
             self.queue(
-                Request::Scroll {
-                    handle,
-                    process_id,
+                protocol::InputEvent::Scroll {
                     x,
                     y,
                     horizontal,
@@ -882,8 +919,8 @@ impl RemoteView {
         }
     }
 
-    fn queue(&mut self, request: Request, cx: &mut Context<Self>) {
-        if self.input.try_send(request).is_err() {
+    fn queue(&mut self, request: protocol::InputEvent, cx: &mut Context<Self>) {
+        if self.input.try_send((Instant::now(), request)).is_err() {
             self.input_error = Some("A fila de entrada está ocupada".into());
             cx.notify();
         }
@@ -920,15 +957,7 @@ impl RemoteView {
                 _ => return,
             },
         };
-        let (handle, process_id) = self.target;
-        self.queue(
-            Request::Key {
-                handle,
-                process_id,
-                key,
-            },
-            cx,
-        );
+        self.queue(protocol::InputEvent::Key(key), cx);
     }
 }
 
