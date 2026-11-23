@@ -9,7 +9,7 @@ Baixe a mesma versão do host para Windows x64 e do cliente para Mac Apple Silic
 1. No Windows, abra o host e selecione o endereço da sua rede local. Se o Firewall solicitar acesso, autorize no perfil privado.
 2. Clique em **Autorizar novo Mac**. No Mac, selecione o host em **Hosts na rede local** ou digite o endereço e clique em **Conectar**.
 3. Confira o código exibido nos dois computadores. Clique em **Aprovar Mac** no Windows e confirme a comparação no Mac. O cliente guarda a identidade para as próximas conexões.
-4. Clique em uma janela para abrir a transmissão. Ela abre com a proporção do quadro capturado e é reduzida se ultrapassar a área útil da tela.
+4. Clique em uma janela para abrir a transmissão. Ela abre nas dimensões em pixels do quadro capturado, incluindo em telas Retina, e mantém a proporção ao redimensionar. Se a janela for maior que a área útil, parte dela pode ficar fora da tela.
 5. Passe o cursor pela borda superior da transmissão para revelar os três botões nativos do macOS. O conteúdo capturado preserva a aparência do aplicativo Windows.
 6. No Windows, clique em **Parar compartilhamento** para encerrar as transmissões.
 

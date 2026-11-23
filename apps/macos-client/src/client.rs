@@ -963,7 +963,7 @@ impl RemoteView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        set_native_aspect(window, frame.width, frame.height);
+        set_native_geometry(window, frame.width, frame.height);
         let target = (info.handle, info.process_id);
         let focus = cx.focus_handle();
         focus.focus(window);
@@ -1085,17 +1085,15 @@ fn remote_options(launcher: &Window, title: &str, frame: &VideoFrame, cx: &App) 
     );
     let work_area = display_work_area(launcher, bounds);
     let scale = launcher.scale_factor().max(1.);
-    let width = frame.width as f32 / scale;
-    let height = frame.height as f32 / scale;
-    let fit = 1.0_f32
-        .min((work_area.size.width.to_f64() as f32 - 24.).max(1.) / width)
-        .min((work_area.size.height.to_f64() as f32 - 24.).max(1.) / height);
-    let content = size(px(width * fit), px(height * fit));
+    let content = size(
+        px(frame.width as f32 / scale),
+        px(frame.height as f32 / scale),
+    );
+    let mut bounds = Bounds::centered_at(work_area.center(), content);
+    bounds.origin.x = bounds.origin.x.max(work_area.origin.x);
+    bounds.origin.y = bounds.origin.y.max(work_area.origin.y);
     WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered_at(
-            work_area.center(),
-            content,
-        ))),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
         display_id: display.map(|display| display.id()),
         titlebar: Some(TitlebarOptions {
             title: Some(title.to_owned().into()),
@@ -1145,12 +1143,16 @@ fn display_work_area(window: &Window, fallback: Bounds<gpui::Pixels>) -> Bounds<
     )
 }
 
-fn set_native_aspect(window: &Window, width: u32, height: u32) {
+fn set_native_geometry(window: &Window, width: u32, height: u32) {
     use objc2::msg_send;
     use objc2_foundation::NSSize;
     if let Some(native) = appkit_window(window) {
         unsafe {
-            let _: () = msg_send![native.as_ptr(), setContentAspectRatio: NSSize::new(f64::from(width), f64::from(height))];
+            let backing_scale: f64 = msg_send![native.as_ptr(), backingScaleFactor];
+            let pixels = NSSize::new(f64::from(width), f64::from(height));
+            let content = NSSize::new(pixels.width / backing_scale, pixels.height / backing_scale);
+            let _: () = msg_send![native.as_ptr(), setContentAspectRatio: pixels];
+            let _: () = msg_send![native.as_ptr(), setContentSize: content];
         }
     }
 }
