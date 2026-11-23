@@ -213,4 +213,26 @@ mod tests {
         );
         Ok(())
     }
+    #[test]
+    fn decoder_uses_new_dimensions_after_h264_parameter_sets_change() -> Result<()> {
+        let mut decoder = Decoder::default();
+        for (sample, expected, channel) in [
+            (
+                include_bytes!("../../../tests/fixtures/red-32x24.h264").as_slice(),
+                (32, 24),
+                2,
+            ),
+            (
+                include_bytes!("../../../tests/fixtures/blue-48x32.h264").as_slice(),
+                (48, 32),
+                0,
+            ),
+        ] {
+            let frame = decoder.decode(sample)?.expect("missing picture");
+            assert_eq!((frame.width, frame.height), expected);
+            assert_eq!(frame.bgra.len(), (expected.0 * expected.1 * 4) as usize);
+            assert!(frame.bgra[channel] > 200);
+        }
+        Ok(())
+    }
 }
