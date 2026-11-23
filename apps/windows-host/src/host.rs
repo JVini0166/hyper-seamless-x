@@ -669,6 +669,7 @@ fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton)
     let flags = match button {
         protocol::PointerButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
         protocol::PointerButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        protocol::PointerButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
     };
     pointer_window(window, x, y, &[(flags.0, 0), (flags.1, 0)], true)
 }

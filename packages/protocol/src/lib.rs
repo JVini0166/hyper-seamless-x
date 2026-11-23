@@ -171,6 +171,7 @@ pub enum EditingShortcut {
 pub enum PointerButton {
     Left,
     Right,
+    Middle,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]

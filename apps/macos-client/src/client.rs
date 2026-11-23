@@ -1524,6 +1524,12 @@ impl Render for RemoteView {
                     this.click(event.position, protocol::PointerButton::Right, window, cx);
                 }),
             )
+            .on_mouse_up(
+                gpui::MouseButton::Middle,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.click(event.position, protocol::PointerButton::Middle, window, cx);
+                }),
+            )
             .flex()
             .items_center()
             .justify_center()
