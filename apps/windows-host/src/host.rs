@@ -326,8 +326,11 @@ enum CapturedPacket {
 
 type Latest = Arc<CaptureQueue>;
 
+const BACKGROUND_CAPTURE_INTERVAL_MS: u32 = 66;
+
 struct Capture {
     latest: Latest,
+    hwnd: usize,
     scratch: Vec<u8>,
     last: Instant,
     gpu_enabled: bool,
@@ -337,13 +340,14 @@ struct Capture {
 }
 
 impl GraphicsCaptureApiHandler for Capture {
-    type Flags = (Latest, bool);
+    type Flags = (Latest, bool, usize);
     type Error = protocol::Error;
 
     fn new(context: Context<Self::Flags>) -> Result<Self> {
         Ok(Self {
             latest: context.flags.0,
             gpu_enabled: context.flags.1,
+            hwnd: context.flags.2,
             gpu_encoder: None,
             device: context.device,
             device_context: context.device_context,
@@ -358,11 +362,19 @@ impl GraphicsCaptureApiHandler for Capture {
         _: InternalCaptureControl,
     ) -> Result<()> {
         let started = Instant::now();
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+        let foreground = unsafe { GetForegroundWindow() } as usize;
+        let minimum_interval = if foreground == self.hwnd {
+            protocol::MIN_CAPTURE_INTERVAL_MS
+        } else {
+            BACKGROUND_CAPTURE_INTERVAL_MS
+        };
         let interval_ms = self
             .latest
             .interval_ms
             .load(Ordering::Relaxed)
-            .max(protocol::MIN_CAPTURE_INTERVAL_MS);
+            .max(minimum_interval);
         if self.last.elapsed() < Duration::from_millis(u64::from(interval_ms)) {
             self.latest.dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
@@ -479,6 +491,7 @@ fn capture(
         None
     };
     let latest = Latest::default();
+    let hwnd = window.as_raw_hwnd() as usize;
     let settings = Settings::new(
         window,
         CursorCaptureSettings::Default,
@@ -487,7 +500,7 @@ fn capture(
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
-        (latest.clone(), h264),
+        (latest.clone(), h264, hwnd),
     );
     let control = match Capture::start_free_threaded(settings) {
         Ok(control) => control,
