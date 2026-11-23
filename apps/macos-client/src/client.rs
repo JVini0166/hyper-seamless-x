@@ -802,7 +802,7 @@ fn read_video(
     let rtc = socket
         .lan_ip()
         .filter(|_| h264 && try_rtc)
-        .and_then(|ip| protocol::rtc::VideoPeer::offer(ip).ok());
+        .and_then(|ip| protocol::rtc::VideoPeer::offer(ip, metrics).ok());
     let (response, stream) = host.request_on(
         socket,
         Request::View {
@@ -853,7 +853,22 @@ fn read_video(
                 {
                     return Ok(VideoEnd::RtcUnavailable);
                 }
-                match peer.poll() {
+                let incoming = peer.poll();
+                if let Some(stats) = peer.take_network_stats() {
+                    let rtt = stats
+                        .round_trip_time
+                        .map_or("indisponível".into(), |value| {
+                            format!("{:.3}", value.as_secs_f64() * 1000.0)
+                        });
+                    let loss = stats.ingress_loss.map_or("indisponível".into(), |value| {
+                        format!("{:.2}", value * 100.0)
+                    });
+                    eprintln!(
+                        "video_network window={} transport=webrtc rtt_ms={rtt} ingress_loss_pct={loss}",
+                        info.handle
+                    );
+                }
+                match incoming {
                     Ok(Some(data)) => {
                         let discontinuity = !data.contiguous || keyframe_wait.is_some();
                         if discontinuity && !crate::h264::contains_idr(&data.data) {

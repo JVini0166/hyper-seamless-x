@@ -4,7 +4,7 @@ use crate::Result;
 use std::{
     io::ErrorKind,
     net::{IpAddr, SocketAddr, UdpSocket},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use str0m::{
     Candidate, Event, Input, Output, Rtc, RtcConfig,
@@ -13,6 +13,11 @@ use str0m::{
     media::{Direction, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid},
     net::{Protocol, Receive},
 };
+
+pub struct NetworkStats {
+    pub round_trip_time: Option<Duration>,
+    pub ingress_loss: Option<f32>,
+}
 
 pub struct VideoPeer {
     rtc: Rtc,
@@ -24,10 +29,11 @@ pub struct VideoPeer {
     keyframe_requested: bool,
     estimated_bps: Option<u64>,
     average_frame_bits: Option<u64>,
+    network_stats: Option<NetworkStats>,
 }
 
 impl VideoPeer {
-    fn bind(ip: IpAddr, sending: bool) -> Result<Self> {
+    fn bind(ip: IpAddr, sending: bool, diagnostics: bool) -> Result<Self> {
         let socket = UdpSocket::bind((ip, 0))?;
         socket.set_nonblocking(true)?;
         let local = socket.local_addr()?;
@@ -35,6 +41,7 @@ impl VideoPeer {
         let mut rtc = RtcConfig::new()
             .clear_codecs()
             .enable_h264(true)
+            .set_stats_interval(diagnostics.then(|| Duration::from_secs(1)))
             .enable_bwe(sending.then(|| Bitrate::kbps(6_000)))
             .build(started);
         rtc.add_local_candidate(Candidate::host(local, "udp")?);
@@ -48,11 +55,12 @@ impl VideoPeer {
             keyframe_requested: false,
             estimated_bps: None,
             average_frame_bits: None,
+            network_stats: None,
         })
     }
 
-    pub fn offer(ip: IpAddr) -> Result<(Self, String, SdpPendingOffer)> {
-        let mut peer = Self::bind(ip, false)?;
+    pub fn offer(ip: IpAddr, diagnostics: bool) -> Result<(Self, String, SdpPendingOffer)> {
+        let mut peer = Self::bind(ip, false, diagnostics)?;
         let mut change = peer.rtc.sdp_api();
         let mid = change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
         let (offer, pending) = change.apply().ok_or("Oferta WebRTC indisponível")?;
@@ -61,7 +69,7 @@ impl VideoPeer {
     }
 
     pub fn answer(ip: IpAddr, offer: &str) -> Result<(Self, String)> {
-        let mut peer = Self::bind(ip, true)?;
+        let mut peer = Self::bind(ip, true, false)?;
         let answer = peer
             .rtc
             .sdp_api()
@@ -128,6 +136,10 @@ impl VideoPeer {
         std::mem::take(&mut self.keyframe_requested)
     }
 
+    pub fn take_network_stats(&mut self) -> Option<NetworkStats> {
+        self.network_stats.take()
+    }
+
     /// Drains protocol work and returns at most one complete access unit per call.
     pub fn poll(&mut self) -> Result<Option<MediaData>> {
         let mut remaining_receives = 64;
@@ -153,6 +165,14 @@ impl VideoPeer {
                     estimate,
                     can_probe: true,
                 })) => self.estimated_bps = Some(estimate.as_u64()),
+                Output::Event(Event::PeerStats(stats)) => {
+                    self.network_stats = Some(NetworkStats {
+                        round_trip_time: stats
+                            .selected_candidate_pair
+                            .and_then(|pair| pair.current_round_trip_time),
+                        ingress_loss: stats.ingress_loss_fraction,
+                    });
+                }
                 Output::Event(_) => {}
                 Output::Timeout(deadline) => {
                     let now = Instant::now();
@@ -190,18 +210,19 @@ impl VideoPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{thread, time::Duration};
+    use std::thread;
 
     #[test]
     fn sends_h264_over_ice_and_srtp_on_loopback() -> Result<()> {
         let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-        let (mut client, offer, pending) = VideoPeer::offer(ip)?;
+        let (mut client, offer, pending) = VideoPeer::offer(ip, true)?;
         let (mut host, answer) = VideoPeer::answer(ip, &offer)?;
         client.accept_answer(pending, &answer)?;
         let sample = include_bytes!("../../../tests/fixtures/red-32x24.h264");
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut sent = false;
         let mut requested = false;
+        let mut measured_rtt = false;
         while Instant::now() < deadline {
             host.poll()?;
             if let Some(frame) = client.poll()? {
@@ -214,7 +235,14 @@ mod tests {
                 client.request_keyframe()?;
                 requested = true;
             }
-            if requested && host.keyframe_requested && host.capture_interval_ms().is_some() {
+            measured_rtt |= client
+                .take_network_stats()
+                .is_some_and(|stats| stats.round_trip_time.is_some());
+            if requested
+                && measured_rtt
+                && host.keyframe_requested
+                && host.capture_interval_ms().is_some()
+            {
                 assert!(host.take_keyframe_request());
                 host.average_frame_bits = Some(100_000);
                 host.estimated_bps = Some(1_000_000);
