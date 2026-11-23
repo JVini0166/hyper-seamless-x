@@ -101,6 +101,8 @@ pub enum Request {
         process_id: u32,
         #[serde(default)]
         metrics: bool,
+        #[serde(default)]
+        h264: bool,
     },
     Launch(LaunchApp),
     Input {
@@ -174,6 +176,7 @@ pub enum Response {
     Paired(Pairing),
     Windows(Vec<WindowInfo>),
     Streaming,
+    StreamingH264,
     InputReady,
     Launched,
     Controlled,
@@ -326,6 +329,17 @@ impl Frame {
             decode_micros,
         }))
     }
+}
+
+const MAX_H264_ACCESS_UNIT: usize = 16 * 1024 * 1024;
+
+pub fn send_h264_access_unit(writer: &mut impl Write, annex_b: &[u8]) -> Result<()> {
+    send_packet(writer, annex_b, MAX_H264_ACCESS_UNIT)
+}
+
+pub fn receive_h264_access_unit(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
+    let packet = receive_packet(reader, MAX_H264_ACCESS_UNIT)?;
+    Ok((!packet.is_empty()).then_some(packet))
 }
 
 pub fn heartbeat(writer: &mut impl Write) -> Result<()> {

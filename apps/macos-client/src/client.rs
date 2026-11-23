@@ -737,12 +737,30 @@ fn read_video(
         handle: info.handle,
         process_id: info.process_id,
         metrics,
+        h264: true,
     })?;
-    if !matches!(response, Response::Streaming) {
-        return Err("Resposta de captura inesperada".into());
-    }
+    let mut decoder = match response {
+        Response::Streaming => None,
+        Response::StreamingH264 => Some(crate::h264::Decoder::default()),
+        _ => return Err("Resposta de captura inesperada".into()),
+    };
     while !updates.is_closed() {
-        if let Some(packet) = Frame::receive_with_metrics(&mut stream)? {
+        let packet = if let Some(decoder) = &mut decoder {
+            if let Some(unit) = protocol::receive_h264_access_unit(&mut stream)? {
+                let started = Instant::now();
+                decoder.decode(&unit)?.map(|frame| protocol::ReceivedFrame {
+                    frame,
+                    host_metrics: None,
+                    compressed_bytes: unit.len(),
+                    decode_micros: protocol::duration_micros(started.elapsed()),
+                })
+            } else {
+                None
+            }
+        } else {
+            Frame::receive_with_metrics(&mut stream)?
+        };
+        if let Some(packet) = packet {
             if metrics {
                 report.record(info.handle, &packet);
             }
@@ -1299,7 +1317,7 @@ mod tests {
             pairing: pairing.clone(),
         })?;
         let server = thread::spawn(move || -> Result<()> {
-            for width in [2, 3] {
+            for use_h264 in [false, true] {
                 let deadline = Instant::now() + Duration::from_secs(5);
                 let socket = loop {
                     match listener.accept() {
@@ -1324,16 +1342,25 @@ mod tests {
                     Request::View {
                         handle: 42,
                         process_id: 7,
+                        h264: true,
                         ..
                     }
                 ));
-                protocol::send(&mut stream, &Response::Streaming)?;
-                Frame {
-                    width,
-                    height: 1,
-                    bgra: vec![0; width as usize * 4],
+                if use_h264 {
+                    protocol::send(&mut stream, &Response::StreamingH264)?;
+                    protocol::send_h264_access_unit(
+                        &mut stream,
+                        include_bytes!("../../../tests/fixtures/red-32x24.h264"),
+                    )?;
+                } else {
+                    protocol::send(&mut stream, &Response::Streaming)?;
+                    Frame {
+                        width: 2,
+                        height: 1,
+                        bgra: vec![0; 8],
+                    }
+                    .send(&mut stream)?;
                 }
-                .send(&mut stream)?;
                 // Dropping the socket without close_notify simulates a cut transport.
             }
             Ok(())
@@ -1351,7 +1378,7 @@ mod tests {
         let (observed, events) = mpsc::sync_channel(4);
         let relay = thread::spawn(move || {
             while let Ok(update) = updates.recv_blocking() {
-                let done = matches!(&update, Update::Image(frame) if frame.width == 3);
+                let done = matches!(&update, Update::Image(frame) if frame.width == 32);
                 if observed.send(update).is_err() || done {
                     break;
                 }
@@ -1360,7 +1387,7 @@ mod tests {
         let next = || events.recv_timeout(Duration::from_secs(5));
         assert!(matches!(next()?, Update::Image(frame) if frame.width == 2));
         assert!(matches!(next()?, Update::Reconnecting(_)));
-        assert!(matches!(next()?, Update::Image(frame) if frame.width == 3));
+        assert!(matches!(next()?, Update::Image(frame) if frame.width == 32));
         relay.join().expect("video update relay panicked");
         server.join().expect("test host panicked")?;
         Ok(())

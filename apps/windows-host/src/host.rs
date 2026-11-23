@@ -192,6 +192,7 @@ fn handle(
             handle,
             process_id,
             metrics,
+            ..
         } => match find_window(handle, process_id)? {
             Some(window) => capture(window, &mut stream, stop, metrics),
             None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),

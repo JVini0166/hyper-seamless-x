@@ -3413,6 +3413,7 @@ name = "macos-client"
 version = "0.2.0"
 dependencies = [
  "async-channel 2.5.0",
+ "cc",
  "futures-lite 2.6.1",
  "gpui",
  "gpui-component",

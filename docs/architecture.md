@@ -18,6 +18,10 @@ O host aceita TLS diretamente na porta TCP ou dentro de mensagens WebSocket bin�
 
 Mensagens JSON têm um prefixo de tamanho de 32 bits em ordem de rede. Após a confirmação de captura o fluxo contém pacotes binários. Cada quadro traz largura e altura em ordem de rede seguidas por BGRA comprimido em Zstandard. Um pacote vazio mantém a sessão ativa em janelas estáticas. Uma sessão TLS autenticada e vinculada à janela confirma eventos de entrada em ordem. O cliente reabre a sessão após inatividade, descarta eventos antigos da fila e evita reenviar comandos cujo sucesso seja incerto. A captura exige um HWND e o PID correspondente, conferidos contra a lista atual.
 
+## Recepção de H.264
+
+O cliente oferece suporte a H.264 na solicitação de vídeo. Quando um host responde com `StreamingH264`, envia uma unidade de acesso Annex B por pacote. O início da sessão deve incluir SPS e PPS e um quadro IDR. A configuração de baixa latência deve dispensar reordenação de quadros. O cliente converte os NALs para AVCC, usa VideoToolbox com aceleração permitida e entrega BGRA à janela GPUI. A capacidade efetiva de hardware depende da configuração e do sistema. O host desta versão continua enviando BGRA com Zstandard.
+
 ## Validação em dois computadores
 
 1. Rode `cargo test --locked -p protocol`.
