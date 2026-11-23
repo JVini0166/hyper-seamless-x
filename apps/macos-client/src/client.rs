@@ -727,6 +727,7 @@ struct InputSession {
     host: Host,
     target: (u64, u32),
     stream: Option<(Instant, StreamOwned<ClientConnection, Wire>, bool)>,
+    resize_supported: bool,
 }
 
 impl InputSession {
@@ -743,16 +744,22 @@ impl InputSession {
                     handle,
                     process_id,
                     focus: true,
+                    resize: true,
                 })?;
+                self.resize_supported = matches!(response, Response::InputReadyWithFocusAndResize);
                 match response {
-                    Response::InputReadyWithFocus => (stream, true),
+                    Response::InputReadyWithFocusAndResize | Response::InputReadyWithFocus => {
+                        (stream, true)
+                    }
                     Response::InputReady => (stream, false),
                     _ => return Err("Resposta de canal de entrada inesperada".into()),
                 }
             }
         };
         let sent_at = Instant::now();
-        if matches!(event, protocol::InputEvent::Focus) && !focus_supported {
+        if (matches!(event, protocol::InputEvent::Focus) && !focus_supported)
+            || (matches!(event, protocol::InputEvent::Resize { .. }) && !self.resize_supported)
+        {
             self.stream = Some((sent_at, stream, focus_supported));
             return Ok(());
         }
@@ -779,6 +786,8 @@ struct RemoteView {
     _chrome_task: Task<()>,
     _input_task: Task<()>,
     _activation: Subscription,
+    _bounds: Subscription,
+    resize_task: Option<Task<()>>,
     input: async_channel::Sender<(Instant, protocol::InputEvent)>,
     focus: gpui::FocusHandle,
     scroll_remainder: (f64, f64),
@@ -1250,6 +1259,7 @@ impl RemoteView {
                 host,
                 target,
                 stream: None,
+                resize_supported: false,
             };
             while let Ok((queued, event)) = requests.recv_blocking() {
                 if queued.elapsed() >= Duration::from_secs(1) {
@@ -1272,6 +1282,30 @@ impl RemoteView {
             if window.is_window_active() && view.frame.is_some() {
                 view.queue(protocol::InputEvent::Focus, cx);
             }
+        });
+        let bounds = cx.observe_window_bounds(window, |view, window, cx| {
+            if !native_live_resize(window) {
+                return;
+            }
+            view.resize_task = Some(cx.spawn_in(window, async move |view, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(150))
+                        .await;
+                    let waiting = view.update_in(cx, |view, window, cx| {
+                        if native_live_resize(window) {
+                            return true;
+                        }
+                        if let Some((width, height)) = view.remote_resize_target(window) {
+                            view.queue(protocol::InputEvent::Resize { width, height }, cx);
+                        }
+                        false
+                    });
+                    if !matches!(waiting, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
         });
         if window.is_window_active() {
             let _ = input.try_send((Instant::now(), protocol::InputEvent::Focus));
@@ -1366,6 +1400,8 @@ impl RemoteView {
             _chrome_task: chrome_task,
             _input_task: input_task,
             _activation: activation,
+            _bounds: bounds,
+            resize_task: None,
             input,
             focus,
             scroll_remainder: (0., 0.),
@@ -1425,6 +1461,14 @@ fn appkit_window(window: &Window) -> Option<std::ptr::NonNull<objc2::runtime::An
     let native: *mut AnyObject =
         unsafe { msg_send![handle.ns_view.as_ptr().cast::<AnyObject>(), window] };
     std::ptr::NonNull::new(native)
+}
+
+fn native_live_resize(window: &Window) -> bool {
+    use objc2::{msg_send, runtime::Bool};
+    appkit_window(window).is_some_and(|native| {
+        let resizing: Bool = unsafe { msg_send![native.as_ptr(), inLiveResize] };
+        resizing.as_bool()
+    })
 }
 
 fn activate_remote_window(window: &Window) {
@@ -1503,6 +1547,21 @@ fn set_native_buttons(window: &Window, visible: bool) {
 }
 
 impl RemoteView {
+    fn remote_resize_target(&self, window: &Window) -> Option<(u32, u32)> {
+        let frame = self.frame.as_ref()?;
+        if window.is_fullscreen() || window.is_maximized() || !window.is_window_active() {
+            return None;
+        }
+        let viewport = window.viewport_size();
+        let scale = f64::from(window.scale_factor());
+        let width = (viewport.width.to_f64() * scale).round() as u32;
+        let height = (viewport.height.to_f64() * scale).round() as u32;
+        (width >= 64
+            && height >= 64
+            && (width.abs_diff(frame.width) > 1 || height.abs_diff(frame.height) > 1))
+            .then_some((width, height))
+    }
+
     fn click(
         &mut self,
         position: gpui::Point<gpui::Pixels>,

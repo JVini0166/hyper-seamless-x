@@ -117,6 +117,8 @@ pub enum Request {
         process_id: u32,
         #[serde(default)]
         focus: bool,
+        #[serde(default)]
+        resize: bool,
     },
     Control {
         handle: u64,
@@ -140,6 +142,10 @@ pub enum InputEvent {
     },
     Key(RemoteKey),
     Focus,
+    Resize {
+        width: u32,
+        height: u32,
+    },
     Drag {
         from: (u16, u16),
         to: (u16, u16),
@@ -206,6 +212,7 @@ pub enum Response {
     StreamingRtc { answer: String },
     InputReady,
     InputReadyWithFocus,
+    InputReadyWithFocusAndResize,
     Launched,
     Controlled,
     Error(String),

@@ -211,7 +211,8 @@ fn handle(
             handle,
             process_id,
             focus,
-        } => serve_input(&mut stream, handle, process_id, focus, stop),
+            resize,
+        } => serve_input(&mut stream, handle, process_id, focus, resize, stop),
         Request::Control {
             handle,
             process_id,
@@ -234,13 +235,16 @@ fn serve_input(
     handle: u64,
     process_id: u32,
     focus: bool,
+    resize: bool,
     stop: &AtomicBool,
 ) -> Result<()> {
     use protocol::InputEvent;
     if find_window(handle, process_id)?.is_none() {
         return protocol::send(stream, &Response::Error("Janela indisponível".into()));
     }
-    let ready = if focus {
+    let ready = if focus && resize {
+        Response::InputReadyWithFocusAndResize
+    } else if focus {
         Response::InputReadyWithFocus
     } else {
         Response::InputReady
@@ -264,6 +268,8 @@ fn serve_input(
             } => scroll_window(window, x, y, horizontal, vertical),
             InputEvent::Key(key) => send_key(window, key),
             InputEvent::Focus => focus_window(window),
+            InputEvent::Resize { width, height } if resize => resize_window(window, width, height),
+            InputEvent::Resize { .. } => Err("Redimensionamento não negociado".into()),
             InputEvent::Drag { from: (x, y), to } => {
                 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
                 pointer_window(
@@ -742,6 +748,55 @@ fn send_h264(
         protocol::send_h264_access_unit(stream, &metrics.h264_marker())?;
     }
     protocol::send_h264_access_unit(stream, unit)
+}
+
+fn resize_window(window: Window, width: u32, height: u32) -> Result<()> {
+    use windows_sys::Win32::{
+        Foundation::RECT,
+        Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
+        UI::WindowsAndMessaging::{
+            GetWindowRect, IsIconic, IsZoomed, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOZORDER, SetWindowPos,
+        },
+    };
+    if width < 64
+        || height < 64
+        || u64::from(width) * u64::from(height) > protocol::MAX_PIXELS as u64
+    {
+        return Err("Dimensões de janela fora do limite".into());
+    }
+    let _guard = INPUT_LOCK.lock().map_err(|_| "Entrada indisponível")?;
+    let hwnd = window.as_raw_hwnd();
+    let (mut outer, mut visible) = (RECT::default(), RECT::default());
+    unsafe {
+        if IsIconic(hwnd) != 0
+            || IsZoomed(hwnd) != 0
+            || GetWindowRect(hwnd, &mut outer) == 0
+            || DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+                (&mut visible as *mut RECT).cast(),
+                size_of::<RECT>() as u32,
+            ) < 0
+        {
+            return Err("Restaure a janela no Windows antes de redimensionar".into());
+        }
+        let extra_width = (outer.right - outer.left) - (visible.right - visible.left);
+        let extra_height = (outer.bottom - outer.top) - (visible.bottom - visible.top);
+        if SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            width as i32 + extra_width.max(0),
+            height as i32 + extra_height.max(0),
+            SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER,
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
 }
 
 fn focus_window(window: Window) -> Result<()> {

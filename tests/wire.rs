@@ -26,6 +26,7 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
                     handle: 42,
                     process_id: 7,
                     focus: true,
+                    resize: true,
                 }
             ));
             if !should_accept {
@@ -33,7 +34,7 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
                 continue;
             }
             hello.verify(&host_pairing)?;
-            protocol::send(&mut stream, &Response::InputReadyWithFocus)?;
+            protocol::send(&mut stream, &Response::InputReadyWithFocusAndResize)?;
             assert!(matches!(
                 protocol::receive::<InputEvent>(&mut stream)?,
                 InputEvent::Focus
@@ -54,6 +55,14 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
                 InputEvent::Drag {
                     from: (100, 200),
                     to: (300, 400)
+                }
+            ));
+            protocol::send(&mut stream, &Response::Controlled)?;
+            assert!(matches!(
+                protocol::receive::<InputEvent>(&mut stream)?,
+                InputEvent::Resize {
+                    width: 1280,
+                    height: 720
                 }
             ));
             protocol::send(&mut stream, &Response::Controlled)?;
@@ -86,6 +95,7 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
                     handle: 42,
                     process_id: 7,
                     focus: true,
+                    resize: true,
                 },
             },
         )?;
@@ -98,7 +108,7 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
     let mut stream = connect(pairing.token)?;
     assert!(matches!(
         protocol::receive::<Response>(&mut stream)?,
-        Response::InputReadyWithFocus
+        Response::InputReadyWithFocusAndResize
     ));
     for event in [
         InputEvent::Focus,
@@ -110,6 +120,10 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
         InputEvent::Drag {
             from: (100, 200),
             to: (300, 400),
+        },
+        InputEvent::Resize {
+            width: 1280,
+            height: 720,
         },
         InputEvent::Key(RemoteKey::Text("ação".into())),
         InputEvent::Key(RemoteKey::EditingShortcut(EditingShortcut::Redo)),
