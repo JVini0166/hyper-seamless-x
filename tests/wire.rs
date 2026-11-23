@@ -49,6 +49,14 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
                 }
             ));
             protocol::send(&mut stream, &Response::Controlled)?;
+            assert!(matches!(
+                protocol::receive::<InputEvent>(&mut stream)?,
+                InputEvent::Drag {
+                    from: (100, 200),
+                    to: (300, 400)
+                }
+            ));
+            protocol::send(&mut stream, &Response::Controlled)?;
             let key: InputEvent = protocol::receive(&mut stream)?;
             assert!(matches!(key, InputEvent::Key(RemoteKey::Text(text)) if text == "ação"));
             protocol::send(&mut stream, &Response::Controlled)?;
@@ -98,6 +106,10 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
             x: 123,
             y: 456,
             button: PointerButton::Right,
+        },
+        InputEvent::Drag {
+            from: (100, 200),
+            to: (300, 400),
         },
         InputEvent::Key(RemoteKey::Text("ação".into())),
         InputEvent::Key(RemoteKey::EditingShortcut(EditingShortcut::Redo)),

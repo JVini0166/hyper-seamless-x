@@ -782,8 +782,9 @@ fn pointer_window(
                 return Err("Área de trabalho virtual indisponível".into());
             }
             let absolute = |pixel: i32, origin: i32, length: i32| {
-                ((i64::from(pixel) - i64::from(origin)) * 65536 / i64::from(length)).clamp(0, 65535)
-                    as i32
+                // Aim for the center of the destination pixel in the normalized desktop.
+                let offset = i64::from(pixel) - i64::from(origin);
+                ((2 * offset + 1) * 32768 / i64::from(length)).clamp(0, 65535) as i32
             };
             inputs.insert(
                 1,
