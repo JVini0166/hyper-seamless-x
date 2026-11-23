@@ -192,9 +192,9 @@ fn handle(
             handle,
             process_id,
             metrics,
-            ..
+            h264,
         } => match find_window(handle, process_id)? {
-            Some(window) => capture(window, &mut stream, stop, metrics),
+            Some(window) => capture(window, &mut stream, stop, metrics, h264),
             None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
         },
         Request::Input { handle, process_id } => serve_input(&mut stream, handle, process_id, stop),
@@ -340,7 +340,13 @@ impl GraphicsCaptureApiHandler for Capture {
     }
 }
 
-fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool, metrics: bool) -> Result<()> {
+fn capture(
+    window: Window,
+    stream: &mut Stream,
+    stop: &AtomicBool,
+    metrics: bool,
+    h264: bool,
+) -> Result<()> {
     let latest = Latest::default();
     let settings = Settings::new(
         window,
@@ -357,7 +363,12 @@ fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool, metrics: bool
         Err(error) => return protocol::send(stream, &Response::Error(error.to_string())),
     };
     let result = (|| {
-        protocol::send(stream, &Response::Streaming)?;
+        let mut announced = !h264;
+        let mut h264_enabled = h264;
+        let mut encoder: Option<crate::h264::Encoder> = None;
+        if announced {
+            protocol::send(stream, &Response::Streaming)?;
+        }
         let mut last_write = Instant::now();
         while !control.is_finished() && !stop.load(Ordering::Acquire) {
             let frame = latest
@@ -367,9 +378,42 @@ fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool, metrics: bool
                 .take();
             if let Some((frame, capture_micros)) = frame {
                 let dropped = latest.dropped.swap(0, Ordering::Relaxed);
+                if h264_enabled {
+                    let encoded = encode_h264_frame(&mut encoder, &frame);
+                    match encoded {
+                        Ok(unit) => {
+                            if !announced {
+                                protocol::send(stream, &Response::StreamingH264)?;
+                                announced = true;
+                            }
+                            protocol::send_h264_access_unit(stream, &unit)?;
+                            last_write = Instant::now();
+                            continue;
+                        }
+                        Err(_) => {
+                            if announced {
+                                protocol::send_h264_access_unit(
+                                    stream,
+                                    protocol::H264_SWITCH_TO_BGRA,
+                                )?;
+                            }
+                            h264_enabled = false;
+                            encoder = None;
+                        }
+                    }
+                }
+                if !announced {
+                    protocol::send(stream, &Response::Streaming)?;
+                    announced = true;
+                }
                 frame.send_with_metrics(stream, metrics.then_some((capture_micros, dropped)))?;
                 last_write = Instant::now();
             } else if last_write.elapsed() >= Duration::from_secs(2) {
+                if !announced {
+                    protocol::send(stream, &Response::Streaming)?;
+                    announced = true;
+                    h264_enabled = false;
+                }
                 protocol::heartbeat(stream)?;
                 last_write = Instant::now();
             } else {
@@ -382,6 +426,21 @@ fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool, metrics: bool
     })();
     let stop = control.stop();
     result.and_then(|()| Ok(stop?))
+}
+
+fn encode_h264_frame(encoder: &mut Option<crate::h264::Encoder>, frame: &Frame) -> Result<Vec<u8>> {
+    if !encoder
+        .as_ref()
+        .is_some_and(|encoder| encoder.matches(frame))
+    {
+        // Release the previous COM session before initializing a new format.
+        *encoder = None;
+        *encoder = Some(crate::h264::Encoder::new(frame.width, frame.height)?);
+    }
+    encoder
+        .as_mut()
+        .ok_or("Encoder indisponível")?
+        .encode(frame)
 }
 
 fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton) -> Result<()> {

@@ -13,3 +13,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 if-addrs = "0.15"
 mdns-sd = "0.22"
+
+[build-dependencies]
+cc = "1"

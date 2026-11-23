@@ -7150,6 +7150,7 @@ dependencies = [
 name = "windows-host"
 version = "0.2.0"
 dependencies = [
+ "cc",
  "gpui",
  "if-addrs",
  "mdns-sd",

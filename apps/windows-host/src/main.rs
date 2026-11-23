@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod h264;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod ui;

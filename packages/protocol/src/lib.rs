@@ -333,6 +333,9 @@ impl Frame {
 
 const MAX_H264_ACCESS_UNIT: usize = 16 * 1024 * 1024;
 
+/// A negotiated H.264 stream can switch once to the BGRA fallback.
+pub const H264_SWITCH_TO_BGRA: &[u8] = b"HSX:BGRA";
+
 pub fn send_h264_access_unit(writer: &mut impl Write, annex_b: &[u8]) -> Result<()> {
     send_packet(writer, annex_b, MAX_H264_ACCESS_UNIT)
 }

@@ -745,15 +745,21 @@ fn read_video(
         _ => return Err("Resposta de captura inesperada".into()),
     };
     while !updates.is_closed() {
-        let packet = if let Some(decoder) = &mut decoder {
+        let packet = if let Some(h264_decoder) = &mut decoder {
             if let Some(unit) = protocol::receive_h264_access_unit(&mut stream)? {
+                if unit == protocol::H264_SWITCH_TO_BGRA {
+                    decoder = None;
+                    continue;
+                }
                 let started = Instant::now();
-                decoder.decode(&unit)?.map(|frame| protocol::ReceivedFrame {
-                    frame,
-                    host_metrics: None,
-                    compressed_bytes: unit.len(),
-                    decode_micros: protocol::duration_micros(started.elapsed()),
-                })
+                h264_decoder
+                    .decode(&unit)?
+                    .map(|frame| protocol::ReceivedFrame {
+                        frame,
+                        host_metrics: None,
+                        compressed_bytes: unit.len(),
+                        decode_micros: protocol::duration_micros(started.elapsed()),
+                    })
             } else {
                 None
             }
@@ -1316,6 +1322,7 @@ mod tests {
             address,
             pairing: pairing.clone(),
         })?;
+        let (decoded, proceed) = mpsc::sync_channel(1);
         let server = thread::spawn(move || -> Result<()> {
             for use_h264 in [false, true] {
                 let deadline = Instant::now() + Duration::from_secs(5);
@@ -1352,6 +1359,14 @@ mod tests {
                         &mut stream,
                         include_bytes!("../../../tests/fixtures/red-32x24.h264"),
                     )?;
+                    proceed.recv_timeout(Duration::from_secs(5))?;
+                    protocol::send_h264_access_unit(&mut stream, protocol::H264_SWITCH_TO_BGRA)?;
+                    Frame {
+                        width: 4,
+                        height: 1,
+                        bgra: vec![0; 16],
+                    }
+                    .send(&mut stream)?;
                 } else {
                     protocol::send(&mut stream, &Response::Streaming)?;
                     Frame {
@@ -1378,7 +1393,7 @@ mod tests {
         let (observed, events) = mpsc::sync_channel(4);
         let relay = thread::spawn(move || {
             while let Ok(update) = updates.recv_blocking() {
-                let done = matches!(&update, Update::Image(frame) if frame.width == 32);
+                let done = matches!(&update, Update::Image(frame) if frame.width == 4);
                 if observed.send(update).is_err() || done {
                     break;
                 }
@@ -1388,6 +1403,8 @@ mod tests {
         assert!(matches!(next()?, Update::Image(frame) if frame.width == 2));
         assert!(matches!(next()?, Update::Reconnecting(_)));
         assert!(matches!(next()?, Update::Image(frame) if frame.width == 32));
+        decoded.send(())?;
+        assert!(matches!(next()?, Update::Image(frame) if frame.width == 4));
         relay.join().expect("video update relay panicked");
         server.join().expect("test host panicked")?;
         Ok(())
