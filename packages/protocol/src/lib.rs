@@ -1,5 +1,6 @@
 mod endpoint;
 mod pairing;
+pub mod rtc;
 
 pub use endpoint::{Endpoint, Wire, use_incoming};
 pub use pairing::{PairingGate, PairingState, accept_pairing, request_pairing};
