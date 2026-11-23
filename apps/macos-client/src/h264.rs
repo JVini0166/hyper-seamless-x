@@ -13,6 +13,7 @@ unsafe extern "C" {
         height: *mut u32,
     ) -> i32;
     fn hsx_decoder_destroy(decoder: *mut c_void);
+    fn hsx_decoder_hardware(decoder: *mut c_void) -> i32;
     fn hsx_decoder_decode(
         decoder: *mut c_void,
         sample: *const u8,
@@ -23,10 +24,18 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecoderMode {
+    Hardware,
+    Software,
+    Unreported,
+}
+
 struct Session {
     decoder: NonNull<c_void>,
     width: u32,
     height: u32,
+    mode: DecoderMode,
 }
 
 impl Session {
@@ -53,6 +62,7 @@ impl Session {
             decoder: NonNull::new(decoder).ok_or("Decodificador H.264 indisponível")?,
             width,
             height,
+            mode: DecoderMode::Unreported,
         })
     }
 
@@ -71,6 +81,13 @@ impl Session {
         };
         if status != 0 {
             return Err(format!("VideoToolbox recusou o quadro H.264 ({status})").into());
+        }
+        if self.mode == DecoderMode::Unreported {
+            self.mode = match unsafe { hsx_decoder_hardware(self.decoder.as_ptr()) } {
+                1 => DecoderMode::Hardware,
+                0 => DecoderMode::Software,
+                _ => DecoderMode::Unreported,
+            };
         }
         Ok(Frame {
             width: self.width,
@@ -94,6 +111,12 @@ pub struct Decoder {
 }
 
 impl Decoder {
+    pub fn mode(&self) -> DecoderMode {
+        self.session
+            .as_ref()
+            .map_or(DecoderMode::Unreported, |session| session.mode)
+    }
+
     pub fn decode(&mut self, unit: &[u8]) -> Result<Option<Frame>> {
         let mut sample = Vec::with_capacity(unit.len() + 16);
         let mut has_picture = false;
@@ -176,7 +199,9 @@ mod tests {
     #[test]
     fn decodes_h264_annex_b_with_video_toolbox() -> Result<()> {
         let sample = include_bytes!("../../../tests/fixtures/red-32x24.h264");
-        let frame = Decoder::default().decode(sample)?.expect("missing picture");
+        let mut decoder = Decoder::default();
+        let frame = decoder.decode(sample)?.expect("missing picture");
+        eprintln!("VideoToolbox fixture decoder: {:?}", decoder.mode());
         assert_eq!((frame.width, frame.height), (32, 24));
         assert_eq!(frame.bgra.len(), 32 * 24 * 4);
         let [blue, green, red, _] = frame.bgra[..4] else {

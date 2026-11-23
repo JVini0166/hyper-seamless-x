@@ -768,7 +768,11 @@ fn read_video(
         };
         if let Some(packet) = packet {
             if metrics {
-                report.record(info.handle, &packet);
+                report.record(
+                    info.handle,
+                    &packet,
+                    decoder.as_ref().map(crate::h264::Decoder::mode),
+                );
             }
             let frame = packet.frame;
             let mut pixels = frame.bgra;
@@ -821,7 +825,12 @@ impl Default for VideoMetrics {
 }
 
 impl VideoMetrics {
-    fn record(&mut self, window: u64, packet: &protocol::ReceivedFrame) {
+    fn record(
+        &mut self,
+        window: u64,
+        packet: &protocol::ReceivedFrame,
+        mode: Option<crate::h264::DecoderMode>,
+    ) {
         self.frames += 1;
         self.bytes += packet.compressed_bytes as u64;
         self.decode += u64::from(packet.decode_micros);
@@ -845,8 +854,14 @@ impl VideoMetrics {
         } else {
             "host_metrics=unavailable".into()
         };
+        let decoder = match mode {
+            Some(crate::h264::DecoderMode::Hardware) => "videotoolbox-hardware",
+            Some(crate::h264::DecoderMode::Software) => "videotoolbox-software",
+            Some(crate::h264::DecoderMode::Unreported) => "videotoolbox-unreported",
+            None => "zstd",
+        };
         eprintln!(
-            "video window={window} received_fps={:.1} compressed_kbps={:.0} decode_us={} {host}",
+            "video window={window} decoder={decoder} received_fps={:.1} compressed_kbps={:.0} decode_us={} {host}",
             self.frames as f64 / seconds,
             self.bytes as f64 * 0.008 / seconds,
             self.decode / self.frames

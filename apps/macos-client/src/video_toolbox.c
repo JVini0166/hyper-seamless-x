@@ -124,3 +124,16 @@ OSStatus hsx_decoder_decode(HsxDecoder *decoder, const uint8_t *sample,
     if (block) CFRelease(block);
     return status;
 }
+
+int32_t hsx_decoder_hardware(HsxDecoder *decoder) {
+    CFTypeRef value = NULL;
+    const OSStatus status = VTSessionCopyProperty(
+        decoder->session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+        NULL, &value);
+    int32_t result = -1;
+    if (status == noErr && value && CFGetTypeID(value) == CFBooleanGetTypeID()) {
+        result = CFBooleanGetValue((CFBooleanRef)value) ? 1 : 0;
+    }
+    if (value) CFRelease(value);
+    return result;
+}
