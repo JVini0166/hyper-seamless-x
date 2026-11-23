@@ -1,7 +1,7 @@
 use gpui::{
     App, Application, Bounds, Context, Entity, ObjectFit, Render, RenderImage, SharedString,
-    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point,
-    prelude::*, px, rgb, size,
+    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div,
+    img, point, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Root, Theme, ThemeMode,
@@ -13,7 +13,7 @@ use protocol::{
 };
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -165,6 +165,7 @@ pub fn run() -> Result<()> {
                     address,
                     windows: Vec::new(),
                     opening: HashSet::new(),
+                    open_windows: HashMap::new(),
                     status,
                     task: None,
                     enrollment: None,
@@ -211,6 +212,7 @@ struct Launcher {
     address: Entity<InputState>,
     windows: Vec<WindowInfo>,
     opening: HashSet<(u64, u32)>,
+    open_windows: HashMap<(u64, u32), WindowHandle<RemoteView>>,
     status: String,
     task: Option<Task<()>>,
     enrollment: Option<Enrollment>,
@@ -385,6 +387,10 @@ impl Launcher {
                 self.task = None;
                 self.host = None;
                 self.windows.clear();
+                self.opening.clear();
+                for (_, handle) in self.open_windows.drain() {
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                }
                 self.status = "Autorize um novo pareamento no Windows e conecte novamente.".into();
             }
             Err(error) => self.status = format!("Falha ao esquecer endereço · {error}"),
@@ -397,6 +403,23 @@ impl Launcher {
             return;
         };
         let key = (info.handle, info.process_id);
+        self.open_windows
+            .retain(|_, handle| handle.read(cx).is_ok());
+        if let Some(handle) = self.open_windows.get(&key)
+            && handle
+                .update(cx, |view, window, _| {
+                    if view.frame.is_none() {
+                        window.remove_window();
+                        false
+                    } else {
+                        activate_remote_window(window);
+                        true
+                    }
+                })
+                .unwrap_or(false)
+        {
+            return;
+        }
         if !self.opening.insert(key) {
             return;
         }
@@ -411,6 +434,13 @@ impl Launcher {
             })
             .await;
             let _ = view.update_in(cx, |view, window, cx| {
+                if view
+                    .host
+                    .as_ref()
+                    .is_none_or(|current| !Arc::ptr_eq(&current.config, &host.config))
+                {
+                    return;
+                }
                 view.opening.remove(&key);
                 match first {
                     Some(Update::Image(frame)) => {
@@ -418,7 +448,10 @@ impl Launcher {
                         match cx.open_window(options, |window, cx| {
                             cx.new(|cx| RemoteView::new(frame, frames, host, info, window, cx))
                         }) {
-                            Ok(_) => view.status = format!("{title} aberto"),
+                            Ok(handle) => {
+                                view.open_windows.insert(key, handle);
+                                view.status = format!("{title} aberto");
+                            }
                             Err(error) => view.status = error.to_string(),
                         }
                     }
@@ -1248,6 +1281,19 @@ fn appkit_window(window: &Window) -> Option<std::ptr::NonNull<objc2::runtime::An
     let native: *mut AnyObject =
         unsafe { msg_send![handle.ns_view.as_ptr().cast::<AnyObject>(), window] };
     std::ptr::NonNull::new(native)
+}
+
+fn activate_remote_window(window: &Window) {
+    use objc2::{msg_send, runtime::Bool};
+    if let Some(native) = appkit_window(window) {
+        unsafe {
+            let minimized: Bool = msg_send![native.as_ptr(), isMiniaturized];
+            if minimized.as_bool() {
+                let _: () = msg_send![native.as_ptr(), deminiaturize: std::ptr::null::<objc2::runtime::AnyObject>()];
+            }
+        }
+    }
+    window.activate_window();
 }
 
 fn display_work_area(window: &Window, fallback: Bounds<gpui::Pixels>) -> Bounds<gpui::Pixels> {
