@@ -99,6 +99,7 @@ impl Hello {
 pub enum Request {
     Pair,
     List,
+    ListCatalog,
     View {
         handle: u64,
         process_id: u32,
@@ -188,7 +189,7 @@ pub enum PointerButton {
     Middle,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LaunchApp {
     Explorer,
     Notepad,
@@ -208,9 +209,15 @@ pub enum Response {
     PairPending,
     Paired(Pairing),
     Windows(Vec<WindowInfo>),
+    WindowCatalog {
+        windows: Vec<WindowInfo>,
+        apps: Vec<LaunchApp>,
+    },
     Streaming,
     StreamingH264,
-    StreamingRtc { answer: String },
+    StreamingRtc {
+        answer: String,
+    },
     InputReady,
     InputReadyWithFocus,
     InputReadyWithFocusAndResize,

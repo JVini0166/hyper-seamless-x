@@ -151,7 +151,7 @@ fn handle(
     hello.verify(pairing)?;
     match hello.request {
         Request::Pair => unreachable!("pairing handled above"),
-        Request::List => {
+        Request::List | Request::ListCatalog => {
             let mut windows: Vec<_> = Window::enumerate()?
                 .into_iter()
                 .filter_map(|window| {
@@ -174,7 +174,16 @@ fn handle(
                 .take(128)
                 .collect();
             windows.sort_by_cached_key(|window| window.title.to_lowercase());
-            protocol::send(&mut stream, &Response::Windows(windows))
+            let response = if matches!(hello.request, Request::ListCatalog) {
+                let apps = [LaunchApp::Explorer, LaunchApp::Notepad, LaunchApp::VsCode]
+                    .into_iter()
+                    .filter(|app| launch_path(*app).is_ok_and(|path| path.is_file()))
+                    .collect();
+                Response::WindowCatalog { windows, apps }
+            } else {
+                Response::Windows(windows)
+            };
+            protocol::send(&mut stream, &response)
         }
         Request::Launch(app) => {
             let result = launch_path(app).and_then(|path| Ok(Command::new(path).spawn()?));

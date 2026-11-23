@@ -64,7 +64,7 @@ impl Host {
         }
     }
 
-    fn list(&self, launch: Option<LaunchApp>) -> Result<Vec<WindowInfo>> {
+    fn list(&self, launch: Option<LaunchApp>) -> Result<(Vec<WindowInfo>, Vec<LaunchApp>)> {
         if let Some(app) = launch {
             let (response, _) = self.request(Request::Launch(app))?;
             if !matches!(response, Response::Launched) {
@@ -72,8 +72,14 @@ impl Host {
             }
             thread::sleep(Duration::from_millis(700));
         }
-        match self.request(Request::List)?.0 {
-            Response::Windows(windows) => Ok(windows),
+        let (response, _) = self
+            .request(Request::ListCatalog)
+            .or_else(|_| self.request(Request::List))?;
+        match response {
+            Response::WindowCatalog { windows, apps } => Ok((windows, apps)),
+            Response::Windows(windows) => {
+                Ok((windows, vec![LaunchApp::Explorer, LaunchApp::Notepad]))
+            }
             _ => Err("Resposta de listagem inesperada".into()),
         }
     }
@@ -164,6 +170,7 @@ pub fn run() -> Result<()> {
                     host,
                     address,
                     windows: Vec::new(),
+                    launchable_apps: Vec::new(),
                     opening: HashSet::new(),
                     open_windows: HashMap::new(),
                     diagnostics: false,
@@ -212,6 +219,7 @@ struct Launcher {
     host: Option<Host>,
     address: Entity<InputState>,
     windows: Vec<WindowInfo>,
+    launchable_apps: Vec<LaunchApp>,
     opening: HashSet<(u64, u32)>,
     open_windows: HashMap<(u64, u32), WindowHandle<RemoteView>>,
     diagnostics: bool,
@@ -389,6 +397,7 @@ impl Launcher {
                 self.task = None;
                 self.host = None;
                 self.windows.clear();
+                self.launchable_apps.clear();
                 self.opening.clear();
                 for (_, handle) in self.open_windows.drain() {
                     let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -495,17 +504,19 @@ impl Launcher {
             let _ = view.update(cx, |this, cx| {
                 this.task = None;
                 match result {
-                    Ok(windows) => {
+                    Ok((windows, apps)) => {
                         this.status = match windows.len() {
                             0 => "Nenhuma janela capturável encontrada".into(),
                             1 => "1 janela disponível".into(),
                             count => format!("{count} janelas disponíveis"),
                         };
                         this.windows = windows;
+                        this.launchable_apps = apps;
                     }
                     Err(error) => {
                         this.status = format!("Falha na conexão · {error}");
                         this.windows.clear();
+                        this.launchable_apps.clear();
                     }
                 }
                 cx.notify();
@@ -663,17 +674,20 @@ impl Render for Launcher {
                             button("refresh", "Atualizar")
                                 .on_click(cx.listener(|this, _, _, cx| this.refresh(None, cx))),
                         )
-                        .child(button("explorer", "Abrir Explorador").on_click(cx.listener(
-                            |this, _, _, cx| this.refresh(Some(LaunchApp::Explorer), cx),
-                        )))
-                        .child(button("notepad", "Abrir Bloco de Notas").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.refresh(Some(LaunchApp::Notepad), cx)
+                        .children(
+                            [
+                                (LaunchApp::Explorer, "explorer", "Abrir Explorador"),
+                                (LaunchApp::Notepad, "notepad", "Abrir Bloco de Notas"),
+                                (LaunchApp::VsCode, "vscode", "Abrir VS Code"),
+                            ]
+                            .into_iter()
+                            .filter(|(app, _, _)| self.launchable_apps.contains(app))
+                            .map(|(app, id, label)| {
+                                button(id, label).on_click(cx.listener(move |view, _, _, cx| {
+                                    view.refresh(Some(app), cx);
+                                }))
                             }),
-                        ))
-                        .child(button("vscode", "Abrir VS Code").on_click(
-                            cx.listener(|this, _, _, cx| this.refresh(Some(LaunchApp::VsCode), cx)),
-                        ))
+                        )
                         .child(
                             button("forget", "Esquecer host")
                                 .on_click(cx.listener(|this, _, _, cx| this.forget_host(cx))),
@@ -1796,6 +1810,54 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn reads_launchable_catalog_and_falls_back_to_legacy_window_list() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = Endpoint::parse(&listener.local_addr()?.to_string())?;
+        let (pairing, key) = protocol::new_identity()?;
+        let config = Arc::new(pairing.server_config(key)?);
+        let host = Host::from_profile(ConnectionProfile {
+            address,
+            pairing: pairing.clone(),
+        })?;
+        let server = thread::spawn(move || -> Result<()> {
+            for reply in [
+                Some(Response::WindowCatalog {
+                    windows: vec![],
+                    apps: vec![LaunchApp::VsCode],
+                }),
+                None,
+                Some(Response::Windows(vec![])),
+            ] {
+                let (socket, _) = listener.accept()?;
+                let mut stream = StreamOwned::new(
+                    rustls::ServerConnection::new(config.clone())?,
+                    protocol::use_incoming(socket)?,
+                );
+                let hello: Hello = protocol::receive(&mut stream)?;
+                hello.verify(&pairing)?;
+                if let Some(reply) = reply {
+                    if matches!(reply, Response::Windows(_)) {
+                        assert!(matches!(hello.request, Request::List));
+                    } else {
+                        assert!(matches!(hello.request, Request::ListCatalog));
+                    }
+                    protocol::send(&mut stream, &reply)?;
+                } else {
+                    assert!(matches!(hello.request, Request::ListCatalog));
+                }
+            }
+            Ok(())
+        });
+        assert!(matches!(host.list(None)?.1.as_slice(), [LaunchApp::VsCode]));
+        assert!(matches!(
+            host.list(None)?.1.as_slice(),
+            [LaunchApp::Explorer, LaunchApp::Notepad]
+        ));
+        server.join().expect("test host panicked")?;
+        Ok(())
+    }
 
     #[test]
     fn reveals_native_buttons_at_the_top_and_keeps_them_clickable() {
