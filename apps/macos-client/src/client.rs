@@ -1012,6 +1012,11 @@ impl RemoteView {
                     .update_in(cx, |this, window, cx| {
                         match update {
                             Update::Image(frame) => {
+                                if this.frame.as_ref().is_none_or(|previous| {
+                                    (previous.width, previous.height) != (frame.width, frame.height)
+                                }) {
+                                    set_native_geometry(window, frame.width, frame.height);
+                                }
                                 if let Some(previous) = this.frame.replace(frame) {
                                     let _ = window.drop_image(previous.image);
                                 }
@@ -1148,11 +1153,14 @@ fn set_native_geometry(window: &Window, width: u32, height: u32) {
     use objc2_foundation::NSSize;
     if let Some(native) = appkit_window(window) {
         unsafe {
-            let backing_scale: f64 = msg_send![native.as_ptr(), backingScaleFactor];
             let pixels = NSSize::new(f64::from(width), f64::from(height));
-            let content = NSSize::new(pixels.width / backing_scale, pixels.height / backing_scale);
             let _: () = msg_send![native.as_ptr(), setContentAspectRatio: pixels];
-            let _: () = msg_send![native.as_ptr(), setContentSize: content];
+            if !window.is_fullscreen() {
+                let backing_scale: f64 = msg_send![native.as_ptr(), backingScaleFactor];
+                let content =
+                    NSSize::new(pixels.width / backing_scale, pixels.height / backing_scale);
+                let _: () = msg_send![native.as_ptr(), setContentSize: content];
+            }
         }
     }
 }
