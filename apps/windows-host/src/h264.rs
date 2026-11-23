@@ -161,7 +161,7 @@ impl Encoder {
     }
 }
 
-fn ready_to_decode(unit: &[u8]) -> bool {
+pub(crate) fn ready_to_decode(unit: &[u8]) -> bool {
     (unit.starts_with(&[0, 0, 1]) || unit.starts_with(&[0, 0, 0, 1]))
         && [5, 7, 8].into_iter().all(|kind| {
             unit.windows(4)

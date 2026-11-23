@@ -276,8 +276,13 @@ fn control_window(window: Window, action: WindowAction) -> Result<()> {
 
 #[derive(Default)]
 struct CaptureQueue {
-    newest: Mutex<Option<(Frame, u32)>>,
+    newest: Mutex<Option<CapturedPacket>>,
     dropped: AtomicU32,
+}
+
+enum CapturedPacket {
+    Raw(Frame, u32),
+    H264(Vec<u8>),
 }
 
 type Latest = Arc<CaptureQueue>;
@@ -286,15 +291,23 @@ struct Capture {
     latest: Latest,
     scratch: Vec<u8>,
     last: Instant,
+    gpu_enabled: bool,
+    gpu_encoder: Option<crate::nvenc::Encoder>,
+    device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    device_context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
 }
 
 impl GraphicsCaptureApiHandler for Capture {
-    type Flags = Latest;
+    type Flags = (Latest, bool);
     type Error = protocol::Error;
 
     fn new(context: Context<Self::Flags>) -> Result<Self> {
         Ok(Self {
-            latest: context.flags,
+            latest: context.flags.0,
+            gpu_enabled: context.flags.1,
+            gpu_encoder: None,
+            device: context.device,
+            device_context: context.device_context,
             scratch: Vec::new(),
             last: Instant::now() - Duration::from_secs(1),
         })
@@ -314,6 +327,35 @@ impl GraphicsCaptureApiHandler for Capture {
         if u64::from(width) * u64::from(height) > protocol::MAX_PIXELS as u64 {
             return Err("Resolução da janela excede o limite".into());
         }
+        if self.gpu_enabled {
+            let pending = self
+                .latest
+                .newest
+                .lock()
+                .map_err(|_| "Fila de captura indisponível")?
+                .is_some();
+            if pending {
+                // Drop before encode so the wire never skips a reference picture.
+                self.latest.dropped.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            match self.encode_gpu(frame, width, height) {
+                Ok(unit) => {
+                    *self
+                        .latest
+                        .newest
+                        .lock()
+                        .map_err(|_| "Fila de captura indisponível")? =
+                        Some(CapturedPacket::H264(unit));
+                    self.last = Instant::now();
+                    return Ok(());
+                }
+                Err(_) => {
+                    self.gpu_encoder = None;
+                    self.gpu_enabled = false;
+                }
+            }
+        }
         let bgra = frame
             .buffer()?
             .as_nopadding_buffer(&mut self.scratch)
@@ -324,7 +366,7 @@ impl GraphicsCaptureApiHandler for Capture {
             .newest
             .lock()
             .map_err(|_| "Fila de captura indisponível")?
-            .replace((
+            .replace(CapturedPacket::Raw(
                 Frame {
                     width,
                     height,
@@ -337,6 +379,33 @@ impl GraphicsCaptureApiHandler for Capture {
         }
         self.last = Instant::now();
         Ok(())
+    }
+}
+
+impl Capture {
+    fn encode_gpu(&mut self, frame: &CaptureFrame, width: u32, height: u32) -> Result<Vec<u8>> {
+        let first = !self
+            .gpu_encoder
+            .as_ref()
+            .is_some_and(|encoder| encoder.matches(width, height));
+        if first {
+            self.gpu_encoder = None;
+            self.gpu_encoder = Some(crate::nvenc::Encoder::from_capture_device(
+                width,
+                height,
+                &self.device,
+                &self.device_context,
+            )?);
+        }
+        let unit = self
+            .gpu_encoder
+            .as_mut()
+            .ok_or("Encoder NVENC indisponível")?
+            .encode_capture_texture(frame.as_raw_texture())?;
+        if first && !crate::h264::ready_to_decode(&unit) {
+            return Err("Primeiro quadro NVENC sem parâmetros H.264".into());
+        }
+        Ok(unit)
     }
 }
 
@@ -356,7 +425,7 @@ fn capture(
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
-        latest.clone(),
+        (latest.clone(), h264),
     );
     let control = match Capture::start_free_threaded(settings) {
         Ok(control) => control,
@@ -376,7 +445,16 @@ fn capture(
                 .lock()
                 .map_err(|_| "Fila de captura indisponível")?
                 .take();
-            if let Some((frame, capture_micros)) = frame {
+            if let Some(CapturedPacket::H264(unit)) = &frame {
+                if !announced {
+                    protocol::send(stream, &Response::StreamingH264)?;
+                    announced = true;
+                }
+                protocol::send_h264_access_unit(stream, unit)?;
+                last_write = Instant::now();
+                continue;
+            }
+            if let Some(CapturedPacket::Raw(frame, capture_micros)) = frame {
                 let dropped = latest.dropped.swap(0, Ordering::Relaxed);
                 if h264_enabled {
                     let encoded = encode_h264_frame(&mut encoder, &frame);
@@ -408,12 +486,7 @@ fn capture(
                 }
                 frame.send_with_metrics(stream, metrics.then_some((capture_micros, dropped)))?;
                 last_write = Instant::now();
-            } else if last_write.elapsed() >= Duration::from_secs(2) {
-                if !announced {
-                    protocol::send(stream, &Response::Streaming)?;
-                    announced = true;
-                    h264_enabled = false;
-                }
+            } else if announced && last_write.elapsed() >= Duration::from_secs(2) {
                 protocol::heartbeat(stream)?;
                 last_write = Instant::now();
             } else {

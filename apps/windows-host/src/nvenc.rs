@@ -8,7 +8,7 @@ use windows::{
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
             Direct3D11::*,
-            Dxgi::{Common::*, CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1},
+            Dxgi::{Common::*, CreateDXGIFactory1, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1},
         },
     },
     core::Interface,
@@ -45,8 +45,35 @@ pub struct Encoder {
     frame_index: u32,
 }
 
+// The encoder exclusively owns its handles. Callers serialize access to the
+// session and its immediate context, including capture callbacks.
+unsafe impl Send for Encoder {}
+
 impl Encoder {
     pub fn new(width: u32, height: u32) -> Result<Self> {
+        let (device, context) = nvidia_device()?;
+        Self::with_device(width, height, device, context)
+    }
+
+    pub fn from_capture_device(
+        width: u32,
+        height: u32,
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+    ) -> Result<Self> {
+        let dxgi: IDXGIDevice = device.cast()?;
+        if unsafe { dxgi.GetAdapter()?.GetDesc()? }.VendorId != 0x10de {
+            return Err("A captura está em outro adaptador".into());
+        }
+        Self::with_device(width, height, device.clone(), context.clone())
+    }
+
+    fn with_device(
+        width: u32,
+        height: u32,
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+    ) -> Result<Self> {
         if width == 0
             || height == 0
             || !width.is_multiple_of(2)
@@ -75,7 +102,6 @@ impl Encoder {
             check(create(&mut api))?;
             (api, version)
         };
-        let (device, context) = nvidia_device()?;
         let desc = D3D11_TEXTURE2D_DESC {
             Width: width,
             Height: height,
@@ -203,6 +229,40 @@ impl Encoder {
                 0,
             );
         }
+        self.encode_uploaded()
+    }
+
+    pub fn matches(&self, width: u32, height: u32) -> bool {
+        (self.width, self.height) == (width, height)
+    }
+
+    pub fn encode_capture_texture(&mut self, source: &ID3D11Texture2D) -> Result<Vec<u8>> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { source.GetDesc(&mut desc) };
+        if desc.Width < self.width
+            || desc.Height < self.height
+            || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+            || desc.SampleDesc.Count != 1
+        {
+            return Err("Textura de captura incompatível com NVENC".into());
+        }
+        let region = D3D11_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: self.width,
+            bottom: self.height,
+            back: 1,
+        };
+        // Both textures belong to the capture device; this copy stays on the GPU.
+        unsafe {
+            self.context
+                .CopySubresourceRegion(&self.texture, 0, 0, 0, 0, source, 0, Some(&region))
+        };
+        self.encode_uploaded()
+    }
+
+    fn encode_uploaded(&mut self) -> Result<Vec<u8>> {
         let mut input: NV_ENC_MAP_INPUT_RESOURCE = unsafe { std::mem::zeroed() };
         input.version = self.version.map_input_resource_ver();
         input.registeredResource = self.registered;
