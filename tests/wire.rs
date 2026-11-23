@@ -3,7 +3,7 @@ use std::{io::Cursor, sync::Arc};
 
 #[test]
 fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result<()> {
-    use protocol::{InputEvent, PointerButton, RemoteKey, Response};
+    use protocol::{EditingShortcut, InputEvent, PointerButton, RemoteKey, Response};
     use std::{
         net::{TcpListener, TcpStream},
         time::Duration,
@@ -46,6 +46,12 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
             let key: InputEvent = protocol::receive(&mut stream)?;
             assert!(matches!(key, InputEvent::Key(RemoteKey::Text(text)) if text == "ação"));
             protocol::send(&mut stream, &Response::Controlled)?;
+            let shortcut: InputEvent = protocol::receive(&mut stream)?;
+            assert!(matches!(
+                shortcut,
+                InputEvent::Key(RemoteKey::EditingShortcut(EditingShortcut::Redo))
+            ));
+            protocol::send(&mut stream, &Response::Controlled)?;
         }
         Ok(())
     });
@@ -86,6 +92,7 @@ fn tls_pairing_authenticates_input_and_rejects_wrong_token() -> protocol::Result
             button: PointerButton::Right,
         },
         InputEvent::Key(RemoteKey::Text("ação".into())),
+        InputEvent::Key(RemoteKey::EditingShortcut(EditingShortcut::Redo)),
     ] {
         protocol::send(&mut stream, &event)?;
         assert!(matches!(
