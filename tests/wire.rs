@@ -24,6 +24,11 @@ fn tls_pairing_authenticates_and_rejects_wrong_token() -> protocol::Result<()> {
                 button: protocol::PointerButton::Right,
             }
         ));
+        let key: Hello = protocol::receive(&mut stream)?;
+        key.verify(&host_pairing)?;
+        assert!(matches!(key.request, Request::Key {
+            handle: 42, process_id: 7, key: protocol::RemoteKey::Text(text),
+        } if text == "ação"));
         let invalid: Hello = protocol::receive(&mut stream)?;
         assert!(invalid.verify(&host_pairing).is_err());
         protocol::send(&mut stream, &protocol::Response::Launched)
@@ -45,6 +50,12 @@ fn tls_pairing_authenticates_and_rejects_wrong_token() -> protocol::Result<()> {
             y: 456,
             button: protocol::PointerButton::Right,
         },
+    };
+    protocol::send(&mut stream, &hello)?;
+    hello.request = Request::Key {
+        handle: 42,
+        process_id: 7,
+        key: protocol::RemoteKey::Text("ação".into()),
     };
     protocol::send(&mut stream, &hello)?;
     hello.token[0] ^= 1;

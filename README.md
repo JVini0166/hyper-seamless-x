@@ -33,6 +33,6 @@ Use Rust estável e o toolchain MSVC com as ferramentas de build C++ do Visual S
 
 ## Estado
 
-O fluxo de vídeo experimental usa BGRA com Zstandard por TCP ou WebSocket e captura limitada a cerca de 30 quadros por segundo. A transmissão aceita cliques esquerdo e direito quando a janela pode receber foco no Windows. Arraste, rolagem, teclado remoto, sincronização automática da geometria das janelas, descoberta mDNS, reconexão, bandeja do Windows e o pipeline WebRTC/H.264 com aceleração por hardware ainda estão pendentes. As metas de latência, resolução e FPS exigem medições.
+O fluxo de vídeo experimental usa BGRA com Zstandard por TCP ou WebSocket e captura limitada a cerca de 30 quadros por segundo. A transmissão aceita cliques esquerdo e direito quando a janela pode receber foco no Windows. Com a janela em primeiro plano, aceita texto e teclas de navegação. Arraste, rolagem, atalhos com modificadores, sincronização automática da geometria das janelas, descoberta mDNS, reconexão, bandeja do Windows e o pipeline WebRTC/H.264 com aceleração por hardware ainda estão pendentes. As metas de latência, resolução e FPS exigem medições.
 
 [Arquitetura e procedimento de validação](docs/architecture.md).

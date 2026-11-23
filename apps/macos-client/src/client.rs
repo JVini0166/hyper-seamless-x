@@ -549,7 +549,9 @@ struct RemoteView {
     _task: Task<()>,
     _chrome_task: Task<()>,
     _input_task: Task<()>,
-    input: async_channel::Sender<(u16, u16, protocol::PointerButton)>,
+    input: async_channel::Sender<Request>,
+    target: (u64, u32),
+    focus: gpui::FocusHandle,
     input_error: Option<String>,
 }
 
@@ -617,26 +619,19 @@ impl RemoteView {
         cx: &mut Context<Self>,
     ) -> Self {
         set_native_aspect(window, frame.width, frame.height);
-        let (input, requests) = async_channel::bounded(4);
+        let target = (info.handle, info.process_id);
+        let focus = cx.focus_handle();
+        focus.focus(window);
+        let (input, requests) = async_channel::bounded(16);
         let input_task = cx.spawn(async move |view, cx| {
-            while let Ok((x, y, button)) = requests.recv().await {
+            while let Ok(request) = requests.recv().await {
                 let host = host.clone();
-                let (handle, process_id) = (info.handle, info.process_id);
                 let result = cx
                     .background_executor()
                     .spawn(async move {
-                        match host
-                            .request(Request::Click {
-                                handle,
-                                process_id,
-                                x,
-                                y,
-                                button,
-                            })?
-                            .0
-                        {
+                        match host.request(request)?.0 {
                             Response::Controlled => Ok(()),
-                            _ => Err(protocol::Error::from("Resposta de clique inesperada")),
+                            _ => Err(protocol::Error::from("Resposta de entrada inesperada")),
                         }
                     })
                     .await;
@@ -703,6 +698,8 @@ impl RemoteView {
             _chrome_task: chrome_task,
             _input_task: input_task,
             input,
+            target,
+            focus,
             input_error: None,
         }
     }
@@ -828,20 +825,68 @@ impl RemoteView {
         };
         let x = normalized(position.x.to_f64(), viewport.width, width);
         let y = normalized(position.y.to_f64(), viewport.height, height);
-        if (0. ..1.).contains(&x)
-            && (0. ..1.).contains(&y)
-            && self
-                .input
-                .try_send((
-                    (x * 65535.).round() as u16,
-                    (y * 65535.).round() as u16,
+        if (0. ..1.).contains(&x) && (0. ..1.).contains(&y) {
+            let (handle, process_id) = self.target;
+            self.queue(
+                Request::Click {
+                    handle,
+                    process_id,
+                    x: (x * 65535.).round() as u16,
+                    y: (y * 65535.).round() as u16,
                     button,
-                ))
-                .is_err()
-        {
-            self.input_error = Some("A fila de cliques está ocupada".into());
+                },
+                cx,
+            );
+        }
+    }
+
+    fn queue(&mut self, request: Request, cx: &mut Context<Self>) {
+        if self.input.try_send(request).is_err() {
+            self.input_error = Some("A fila de entrada está ocupada".into());
             cx.notify();
         }
+    }
+
+    fn key_down(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        use protocol::RemoteKey::*;
+        let stroke = &event.keystroke;
+        if self.frame.is_none()
+            || stroke.modifiers.platform
+            || stroke.modifiers.control
+            || stroke.modifiers.function
+        {
+            return;
+        }
+        let key = match stroke.key.as_str() {
+            "backspace" => Backspace,
+            "delete" => Delete,
+            "enter" => Enter,
+            "tab" => Tab,
+            "escape" => Escape,
+            "left" => Left,
+            "right" => Right,
+            "up" => Up,
+            "down" => Down,
+            "home" => Home,
+            "end" => End,
+            "pageup" => PageUp,
+            "pagedown" => PageDown,
+            _ => match stroke.key_char.as_deref() {
+                Some(text) if !text.is_empty() && !text.chars().any(char::is_control) => {
+                    Text(text.to_owned())
+                }
+                _ => return,
+            },
+        };
+        let (handle, process_id) = self.target;
+        self.queue(
+            Request::Key {
+                handle,
+                process_id,
+                key,
+            },
+            cx,
+        );
     }
 }
 
@@ -850,9 +895,12 @@ impl Render for RemoteView {
         div()
             .size_full()
             .relative()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event, _, cx| this.key_down(event, cx)))
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.focus.focus(window);
                     this.click(event.position, protocol::PointerButton::Left, window, cx);
                 }),
             )

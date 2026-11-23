@@ -208,6 +208,20 @@ fn handle(
             };
             protocol::send(&mut stream, &response)
         }
+        Request::Key {
+            handle,
+            process_id,
+            key,
+        } => {
+            let result = find_window(handle, process_id)?
+                .ok_or_else(|| protocol::Error::from("Janela indisponível"))
+                .and_then(|window| send_key(window, key));
+            let response = match result {
+                Ok(()) => Response::Controlled,
+                Err(error) => Response::Error(error.to_string()),
+            };
+            protocol::send(&mut stream, &response)
+        }
         Request::Control {
             handle,
             process_id,
@@ -355,8 +369,7 @@ fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton)
         },
     };
 
-    static POINTER: Mutex<()> = Mutex::new(());
-    let _guard = POINTER.lock().map_err(|_| "Entrada indisponível")?;
+    let _guard = INPUT_LOCK.lock().map_err(|_| "Entrada indisponível")?;
     let hwnd = window.as_raw_hwnd();
     let mut rect = RECT::default();
     // The current HWND was matched by process ID and the host validates desktop hit testing.
@@ -416,4 +429,89 @@ fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton)
         }
     }
     Ok(())
+}
+
+static INPUT_LOCK: Mutex<()> = Mutex::new(());
+
+fn send_key(window: Window, key: protocol::RemoteKey) -> Result<()> {
+    use protocol::RemoteKey::*;
+    use windows_sys::Win32::UI::{
+        Input::KeyboardAndMouse::*,
+        WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+    };
+
+    let _guard = INPUT_LOCK.lock().map_err(|_| "Entrada indisponível")?;
+    let hwnd = window.as_raw_hwnd();
+    let expected_pid = window.process_id()?;
+    let inputs = match key {
+        Text(value) => {
+            if value.is_empty() || value.len() > 32 || value.chars().any(char::is_control) {
+                return Err("Texto de teclado inválido".into());
+            }
+            value
+                .encode_utf16()
+                .flat_map(|unit| keyboard_pair(0, unit, KEYEVENTF_UNICODE))
+                .collect::<Vec<_>>()
+        }
+        key => {
+            let vk = match key {
+                Backspace => VK_BACK,
+                Delete => VK_DELETE,
+                Enter => VK_RETURN,
+                Tab => VK_TAB,
+                Escape => VK_ESCAPE,
+                Left => VK_LEFT,
+                Right => VK_RIGHT,
+                Up => VK_UP,
+                Down => VK_DOWN,
+                Home => VK_HOME,
+                End => VK_END,
+                PageUp => VK_PRIOR,
+                PageDown => VK_NEXT,
+                Text(_) => unreachable!(),
+            };
+            keyboard_pair(vk, 0, 0).to_vec()
+        }
+    };
+    // Keyboard events go to the foreground input queue. Refuse a different target.
+    unsafe {
+        let mut current_pid = 0;
+        if GetForegroundWindow() != hwnd
+            || GetWindowThreadProcessId(hwnd, &mut current_pid) == 0
+            || current_pid != expected_pid
+        {
+            return Err("Traga a janela para frente no Windows antes de digitar".into());
+        }
+        let sent = SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            size_of::<INPUT>() as i32,
+        ) as usize;
+        if sent != inputs.len() {
+            if sent % 2 == 1 {
+                SendInput(1, &inputs[sent], size_of::<INPUT>() as i32);
+            }
+            return Err("O Windows recusou o evento de teclado".into());
+        }
+    }
+    Ok(())
+}
+
+fn keyboard_pair(
+    vk: u16,
+    scan: u16,
+    flags: u32,
+) -> [windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT; 2] {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+    [flags, flags | KEYEVENTF_KEYUP].map(|dwFlags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: scan,
+                dwFlags,
+                ..Default::default()
+            },
+        },
+    })
 }

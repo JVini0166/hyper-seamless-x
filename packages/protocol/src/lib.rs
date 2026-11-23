@@ -107,11 +107,34 @@ pub enum Request {
         y: u16,
         button: PointerButton,
     },
+    Key {
+        handle: u64,
+        process_id: u32,
+        key: RemoteKey,
+    },
     Control {
         handle: u64,
         process_id: u32,
         action: WindowAction,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum RemoteKey {
+    Text(String),
+    Backspace,
+    Delete,
+    Enter,
+    Tab,
+    Escape,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
