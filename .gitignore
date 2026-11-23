@@ -2,3 +2,5 @@
 .DS_Store
 pairing.json
 host-key.der
+host-identity.json
+*seamless-x-pairing*.json

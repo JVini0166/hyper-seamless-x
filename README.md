@@ -1,32 +1,29 @@
 # Hyper Seamless X
 
-Aplicativo experimental em Rust para visualizar janelas individuais de um PC Windows 11 no macOS. O host usa Windows Graphics Capture e o launcher GPUI abre cada transmissão em uma janela nativa independente do Mac.
+Aplicativos em Rust e GPUI para abrir janelas individuais de um PC Windows 11 no macOS. O host captura cada janela com Windows Graphics Capture. O Mac abre uma janela nativa independente para cada transmissão.
 
-## Executar
+## Usar pela interface
 
-Instale Rust estável nos dois computadores. Para compilar no Windows use o toolchain MSVC com as ferramentas de build C++ do Visual Studio. No Mac use o Xcode com as ferramentas de linha de comando selecionadas.
+Baixe o host para Windows x64 e o cliente para Mac Apple Silicon na página de [releases](https://github.com/JVini0166/hyper-seamless-x/releases). Os pacotes desta prévia têm assinatura ad hoc no Mac e executável sem assinatura no Windows.
 
-No PowerShell do Windows, em uma sessão gráfica ativa, execute a partir da raiz do repositório:
+1. Abra o host no Windows e selecione o endereço da rede local que o Mac usa. Se o Windows solicitar acesso à rede, selecione o perfil privado.
+2. Clique em **Exportar pareamento** e transfira o arquivo JSON ao Mac por um canal privado. O arquivo concede acesso ao Windows enquanto a identidade do host estiver ativa.
+3. Abra **Hyper Seamless X.app** no Mac e clique em **Importar pareamento**. Selecione o JSON. O aplicativo salva o pareamento e lista as janelas disponíveis.
+4. Clique em uma janela para abrir a transmissão. Use os botões do launcher para abrir o Explorador ou o Bloco de Notas e atualizar a lista. A barra da transmissão permite restaurar, minimizar, maximizar e fechar a janela no Windows.
+5. No host, clique em **Parar compartilhamento** para encerrar as transmissões.
 
-```powershell
-.\scripts\build-windows.ps1
-.\target\release\windows-host.exe init "$env:LOCALAPPDATA\HyperSeamlessX"
-.\target\release\windows-host.exe serve "192.168.1.20:47651" "$env:LOCALAPPDATA\HyperSeamlessX"
-```
+Se o endereço do Windows mudar, selecione o novo endereço e exporte outro arquivo de pareamento.
 
-Substitua o IP pelo endereço local do Windows. Se o firewall solicitar acesso, use o perfil da rede privada. Transfira somente o arquivo `pairing.json` ao Mac por um canal privado e mantenha os dois arquivos de identidade fora do repositório.
+## Compilar
 
-No terminal do Mac:
+Use Rust estável e o toolchain MSVC com as ferramentas de build C++ do Visual Studio no Windows. No Mac, use o Xcode com as ferramentas de linha de comando selecionadas.
 
-```sh
-chmod 600 ~/Downloads/pairing.json
-./scripts/run-macos.sh 192.168.1.20:47651 ~/Downloads/pairing.json
-```
-
-Clique numa janela para visualizar a transmissão. O launcher abre o Explorador ou o Bloco de Notas e oferece atualização manual da lista. Cada janela do Mac pode ser movida, redimensionada ou fechada independentemente. A barra da transmissão permite restaurar, minimizar, maximizar e fechar a janela no Windows.
+- Windows: execute `scripts/build-windows.ps1`. O executável fica em `target/release/windows-host.exe`.
+- macOS: execute `scripts/package-macos.sh`. O aplicativo e o ZIP ficam em `target/dist`.
+- Protocolo: execute `cargo test --locked -p protocol` em qualquer uma das plataformas.
 
 ## Estado
 
-Esta versão implementa descoberta manual de janelas, abertura de dois aplicativos, pareamento por arquivo, TLS e visualização de múltiplas janelas. O fluxo de vídeo experimental usa BGRA com Zstandard por TCP e captura limitada a cerca de 30 quadros por segundo. Use janelas pequenas durante a validação em Wi-Fi. Ainda faltam mouse e teclado remotos, sincronização automática do estado das janelas, descoberta mDNS, reconexão, bandeja do Windows e o pipeline WebRTC/H.264 com codificação e decodificação por hardware. As metas de latência, resolução e FPS ainda exigem medições.
+O fluxo de vídeo experimental usa BGRA com Zstandard por TCP e captura limitada a cerca de 30 quadros por segundo. Ainda faltam mouse e teclado remotos, sincronização automática da geometria das janelas, descoberta mDNS, reconexão, bandeja do Windows e o pipeline WebRTC/H.264 com aceleração por hardware. As metas de latência, resolução e FPS ainda exigem medições.
 
 [Arquitetura e procedimento de validação](docs/architecture.md).

@@ -4,13 +4,13 @@ use protocol::{
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use std::{
     fs,
-    io::Write,
+    io::{self, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::Path,
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -25,61 +25,115 @@ use windows_capture::{
 
 type Stream = StreamOwned<ServerConnection, TcpStream>;
 
-pub fn run() -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [command, dir] if command == "init" => initialize(Path::new(dir)),
-        [command, addr, dir] if command == "serve" => serve(addr.parse()?, Path::new(dir)),
-        _ => Err(
-            "Uso: windows-host init <nova-pasta> | windows-host serve <IP:porta> <pasta>".into(),
-        ),
+pub struct Server {
+    stop: Arc<AtomicBool>,
+    listener: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(listener) = self.listener.take() {
+            let _ = listener.join();
+        }
     }
 }
 
-fn initialize(path: &Path) -> Result<()> {
-    let (pairing, key) = protocol::new_identity()?;
-    fs::create_dir(path)?;
-    fs::write(path.join("host-key.der"), key)?;
-    fs::write(path.join("pairing.json"), serde_json::to_vec(&pairing)?)?;
-    println!(
-        "Identidade criada em {}. Transfira apenas pairing.json ao Mac.",
-        path.display()
-    );
-    Ok(())
+pub fn start(addr: SocketAddr, path: &Path) -> Result<(Server, Pairing)> {
+    let listener = TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    let (pairing, key) = load_identity(path)?;
+    let config = Arc::new(pairing.server_config(key)?);
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = stop.clone();
+    let worker_pairing = pairing.clone();
+    let listener = thread::spawn(move || {
+        serve(listener, config, worker_pairing, worker_stop);
+    });
+    Ok((
+        Server {
+            stop,
+            listener: Some(listener),
+        },
+        pairing,
+    ))
 }
 
-fn serve(addr: SocketAddr, path: &Path) -> Result<()> {
-    let pairing: Pairing = serde_json::from_slice(&fs::read(path.join("pairing.json"))?)?;
-    let config = Arc::new(pairing.server_config(fs::read(path.join("host-key.der"))?)?);
-    let listener = TcpListener::bind(addr)?;
+fn load_identity(path: &Path) -> Result<(Pairing, Vec<u8>)> {
+    // Keep both identity parts in a single file so they cannot become mismatched.
+    let path = path.join("host-identity.json");
+    match fs::read(&path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let identity = protocol::new_identity()?;
+            use std::fs::OpenOptions;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            let written = serde_json::to_writer(&mut file, &identity)
+                .map_err(protocol::Error::from)
+                .and_then(|()| Ok(file.sync_all()?));
+            drop(file);
+            if let Err(error) = written {
+                let _ = fs::remove_file(path);
+                return Err(error);
+            }
+            Ok(identity)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn serve(
+    listener: TcpListener,
+    config: Arc<ServerConfig>,
+    pairing: Pairing,
+    stop: Arc<AtomicBool>,
+) {
     let active = Arc::new(AtomicUsize::new(0));
-    println!("Host interativo ouvindo em {}", listener.local_addr()?);
-    for socket in listener.incoming() {
-        let socket = socket?;
+    while !stop.load(Ordering::Acquire) {
+        let socket = match listener.accept() {
+            Ok((socket, _)) => socket,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(40));
+                continue;
+            }
+            Err(_) => break,
+        };
         if active.load(Ordering::Relaxed) >= 12 {
             continue;
         }
         active.fetch_add(1, Ordering::Relaxed);
-        let active = active.clone();
-        let config = config.clone();
-        let pairing = pairing.clone();
+        let (active, config, pairing, stop) = (
+            active.clone(),
+            config.clone(),
+            pairing.clone(),
+            stop.clone(),
+        );
         thread::spawn(move || {
-            if let Err(error) = handle(socket, config, &pairing) {
-                eprintln!("Conexão encerrada: {error}");
-            }
+            let _ = handle(socket, config, &pairing, &stop);
             active.fetch_sub(1, Ordering::Relaxed);
         });
     }
-    Ok(())
 }
 
-fn handle(socket: TcpStream, config: Arc<ServerConfig>, pairing: &Pairing) -> Result<()> {
+fn handle(
+    socket: TcpStream,
+    config: Arc<ServerConfig>,
+    pairing: &Pairing,
+    stop: &AtomicBool,
+) -> Result<()> {
+    socket.set_nonblocking(false)?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
     socket.set_write_timeout(Some(Duration::from_secs(5)))?;
     socket.set_nodelay(true)?;
     let mut stream = StreamOwned::new(ServerConnection::new(config)?, socket);
     let hello: Hello = protocol::receive(&mut stream)?;
     hello.verify(pairing)?;
+    if stop.load(Ordering::Acquire) {
+        return Err("Compartilhamento encerrado".into());
+    }
     match hello.request {
         Request::List => {
             let mut windows: Vec<_> = Window::enumerate()?
@@ -119,7 +173,7 @@ fn handle(socket: TcpStream, config: Arc<ServerConfig>, pairing: &Pairing) -> Re
             protocol::send(&mut stream, &response)
         }
         Request::View { handle, process_id } => match find_window(handle, process_id)? {
-            Some(window) => capture(window, &mut stream),
+            Some(window) => capture(window, &mut stream, stop),
             None => protocol::send(&mut stream, &Response::Error("Janela indisponível".into())),
         },
         Request::Control {
@@ -214,7 +268,7 @@ impl GraphicsCaptureApiHandler for Capture {
     }
 }
 
-fn capture(window: Window, stream: &mut Stream) -> Result<()> {
+fn capture(window: Window, stream: &mut Stream, stop: &AtomicBool) -> Result<()> {
     let latest = Latest::default();
     let settings = Settings::new(
         window,
@@ -233,7 +287,7 @@ fn capture(window: Window, stream: &mut Stream) -> Result<()> {
     let result = (|| {
         protocol::send(stream, &Response::Streaming)?;
         let mut last_write = Instant::now();
-        while !control.is_finished() {
+        while !control.is_finished() && !stop.load(Ordering::Acquire) {
             let frame = latest
                 .lock()
                 .map_err(|_| "Fila de captura indisponível")?

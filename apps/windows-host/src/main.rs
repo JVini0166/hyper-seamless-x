@@ -1,9 +1,14 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(windows)]
 mod host;
+#[cfg(windows)]
+mod ui;
 
 #[cfg(windows)]
 fn main() -> protocol::Result<()> {
-    host::run()
+    ui::run();
+    Ok(())
 }
 
 #[cfg(not(windows))]

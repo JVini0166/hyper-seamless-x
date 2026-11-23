@@ -1,14 +1,17 @@
 use gpui::{
-    App, Application, Bounds, Context, ObjectFit, Render, RenderImage, SharedString, Task,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, ObjectFit, PathPromptOptions, Render, RenderImage,
+    SharedString, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, prelude::*,
+    px, rgb, size,
 };
 use protocol::{
-    Frame, Hello, LaunchApp, Pairing, Request, Response, Result, WindowAction, WindowInfo,
+    ConnectionProfile, Frame, Hello, LaunchApp, Pairing, Request, Response, Result, WindowAction,
+    WindowInfo,
 };
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use std::{
     fs,
     net::{SocketAddr, TcpStream},
+    path::{Path, PathBuf},
     sync::Arc,
     thread,
     time::Duration,
@@ -22,6 +25,14 @@ struct Host {
 }
 
 impl Host {
+    fn from_profile(profile: ConnectionProfile) -> Result<Self> {
+        Ok(Self {
+            addr: profile.address,
+            config: Arc::new(profile.pairing.client_config()?),
+            pairing: profile.pairing,
+        })
+    }
+
     fn request(
         &self,
         request: Request,
@@ -61,18 +72,51 @@ impl Host {
     }
 }
 
+fn profile_path() -> Result<PathBuf> {
+    Ok(
+        PathBuf::from(std::env::var_os("HOME").ok_or("Pasta pessoal indisponível")?)
+            .join("Library/Application Support/HyperSeamlessX/pairing.json"),
+    )
+}
+
+fn read_profile(path: &Path) -> Result<ConnectionProfile> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(8193).read_to_end(&mut bytes)?;
+    if bytes.len() > 8192 {
+        return Err("Arquivo de pareamento grande demais".into());
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn save_profile(profile: &ConnectionProfile) -> Result<()> {
+    let path = profile_path()?;
+    let directory = path.parent().ok_or("Pasta de configuração indisponível")?;
+    fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(&mut file, profile)?;
+    file.persist(path)?;
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let [addr, pairing] = args.as_slice() else {
-        return Err("Uso: macos-client <IP:porta> <pairing.json>".into());
-    };
-    let pairing: Pairing = serde_json::from_slice(&fs::read(pairing)?)?;
-    let host = Host {
-        addr: addr.parse()?,
-        config: Arc::new(pairing.client_config()?),
-        pairing,
+    let (host, status) = match profile_path().and_then(|path| {
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        Ok(Some(Host::from_profile(read_profile(&path)?)?))
+    }) {
+        Ok(Some(host)) => (Some(host), String::new()),
+        Ok(None) => (None, "Importe o pareamento exportado pelo Windows.".into()),
+        Err(error) => (None, format!("Falha ao carregar o pareamento · {error}")),
     };
     Application::new().run(move |cx| {
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
         cx.activate(true);
         let options = window_options(cx, "Hyper Seamless X", 680., 540.);
         if let Err(error) = cx.open_window(options, |_, cx| {
@@ -80,8 +124,9 @@ pub fn run() -> Result<()> {
                 let mut launcher = Launcher {
                     host,
                     windows: Vec::new(),
-                    status: String::new(),
+                    status,
                     task: None,
+                    importing: false,
                 };
                 launcher.refresh(None, cx);
                 launcher
@@ -110,19 +155,63 @@ fn window_options(cx: &App, title: &str, width: f32, height: f32) -> WindowOptio
 }
 
 struct Launcher {
-    host: Host,
+    host: Option<Host>,
     windows: Vec<WindowInfo>,
     status: String,
     task: Option<Task<()>>,
+    importing: bool,
 }
 
 impl Launcher {
+    fn import(&mut self, cx: &mut Context<Self>) {
+        if self.importing {
+            return;
+        }
+        self.importing = true;
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Importar pareamento".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let selected = picker.await;
+            let result = (|| -> Result<_> {
+                let Some(paths) = selected?? else {
+                    return Ok(None);
+                };
+                let path = paths.first().ok_or("Nenhum arquivo selecionado")?;
+                let profile = read_profile(path)?;
+                let host = Host::from_profile(profile.clone())?;
+                save_profile(&profile)?;
+                Ok(Some(host))
+            })();
+            let _ = view.update(cx, |view, cx| {
+                view.importing = false;
+                match result {
+                    Ok(Some(host)) => {
+                        view.task = None;
+                        view.windows.clear();
+                        view.host = Some(host);
+                        view.refresh(None, cx);
+                    }
+                    Ok(None) => {}
+                    Err(error) => view.status = format!("Falha ao importar · {error}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn refresh(&mut self, launch: Option<LaunchApp>, cx: &mut Context<Self>) {
         if self.task.is_some() {
             return;
         }
-        self.status = "Conectando ao Windows…".into();
-        let host = self.host.clone();
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        self.status = format!("Conectando a {}…", host.addr);
         let request = cx
             .background_executor()
             .spawn(async move { host.list(launch) });
@@ -190,15 +279,23 @@ impl Render for Launcher {
                     .flex()
                     .gap_2()
                     .child(
-                        button("refresh", "Atualizar")
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(None, cx))),
+                        button("import", "Importar pareamento")
+                            .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
                     )
-                    .child(button("explorer", "Abrir Explorador").on_click(
-                        cx.listener(|this, _, _, cx| this.refresh(Some(LaunchApp::Explorer), cx)),
-                    ))
-                    .child(button("notepad", "Abrir Bloco de Notas").on_click(
-                        cx.listener(|this, _, _, cx| this.refresh(Some(LaunchApp::Notepad), cx)),
-                    )),
+                    .when(self.host.is_some(), |bar| {
+                        bar.child(
+                            button("refresh", "Atualizar")
+                                .on_click(cx.listener(|this, _, _, cx| this.refresh(None, cx))),
+                        )
+                        .child(button("explorer", "Abrir Explorador").on_click(cx.listener(
+                            |this, _, _, cx| this.refresh(Some(LaunchApp::Explorer), cx),
+                        )))
+                        .child(
+                            button("notepad", "Abrir Bloco de Notas").on_click(cx.listener(
+                                |this, _, _, cx| this.refresh(Some(LaunchApp::Notepad), cx),
+                            )),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -228,7 +325,9 @@ impl Render for Launcher {
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let options = window_options(cx, &info.title, 900., 600.);
-                                let host = this.host.clone();
+                                let Some(host) = this.host.clone() else {
+                                    return;
+                                };
                                 let info = info.clone();
                                 if let Err(error) = cx.open_window(options, |window, cx| {
                                     cx.new(|cx| RemoteView::connect(host, info, window, cx))
