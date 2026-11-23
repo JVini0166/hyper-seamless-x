@@ -725,19 +725,25 @@ enum Update {
     Closed(String),
 }
 
+enum VideoEnd {
+    ViewClosed,
+    DecoderRejected(protocol::Error),
+}
+
 fn read_video(
     host: &Host,
     info: &WindowInfo,
     updates: &async_channel::Sender<Update>,
     delivered: &mut bool,
-) -> Result<()> {
+    h264: bool,
+) -> Result<VideoEnd> {
     let metrics = std::env::var_os("HSX_METRICS").is_some();
     let mut report = VideoMetrics::default();
     let (response, mut stream) = host.request(Request::View {
         handle: info.handle,
         process_id: info.process_id,
         metrics,
-        h264: true,
+        h264,
     })?;
     let mut encoder = None;
     let mut decoder = match response {
@@ -758,14 +764,16 @@ fn read_video(
                     continue;
                 }
                 let started = Instant::now();
-                h264_decoder
-                    .decode(&unit)?
-                    .map(|frame| protocol::ReceivedFrame {
-                        frame,
-                        host_metrics: None,
-                        compressed_bytes: unit.len(),
-                        decode_micros: protocol::duration_micros(started.elapsed()),
-                    })
+                let decoded = match h264_decoder.decode(&unit) {
+                    Ok(decoded) => decoded,
+                    Err(error) => return Ok(VideoEnd::DecoderRejected(error)),
+                };
+                decoded.map(|frame| protocol::ReceivedFrame {
+                    frame,
+                    host_metrics: None,
+                    compressed_bytes: unit.len(),
+                    decode_micros: protocol::duration_micros(started.elapsed()),
+                })
             } else {
                 None
             }
@@ -802,7 +810,7 @@ fn read_video(
             *delivered = true;
         }
     }
-    Ok(())
+    Ok(VideoEnd::ViewClosed)
 }
 
 struct VideoMetrics {
@@ -891,12 +899,10 @@ fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> 
     thread::spawn(move || {
         let mut has_opened = false;
         let mut retries = 0;
+        let mut h264 = true;
         loop {
             let mut delivered = false;
-            let outcome = read_video(&host, &info, &sender, &mut delivered);
-            let Err(error) = outcome else {
-                break;
-            };
+            let outcome = read_video(&host, &info, &sender, &mut delivered, h264);
             if sender.is_closed() {
                 break;
             }
@@ -904,6 +910,17 @@ fn start_video(host: Host, info: WindowInfo) -> async_channel::Receiver<Update> 
                 has_opened = true;
                 retries = 0;
             }
+            let error = match outcome {
+                Ok(VideoEnd::ViewClosed) => break,
+                Ok(VideoEnd::DecoderRejected(error)) if h264 => {
+                    if std::env::var_os("HSX_METRICS").is_some() {
+                        eprintln!("VideoToolbox: {error}. Tentando captura BGRA.");
+                    }
+                    h264 = false;
+                    continue;
+                }
+                Ok(VideoEnd::DecoderRejected(error)) | Err(error) => error,
+            };
             if !has_opened || retries == 5 || !transient_video_error(&error) {
                 let _ = sender
                     .send_blocking(Update::Closed(format!("Transmissão encerrada · {error}")));
@@ -1465,6 +1482,60 @@ mod tests {
         decoded.send(())?;
         assert!(matches!(next()?, Update::Image(frame) if frame.width == 4));
         relay.join().expect("video update relay panicked");
+        server.join().expect("test host panicked")?;
+        Ok(())
+    }
+    #[test]
+    fn rejected_h264_reopens_the_window_stream_as_bgra() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = Endpoint::parse(&listener.local_addr()?.to_string())?;
+        let (pairing, key) = protocol::new_identity()?;
+        let config = Arc::new(pairing.server_config(key)?);
+        let host = Host::from_profile(ConnectionProfile {
+            address,
+            pairing: pairing.clone(),
+        })?;
+        let server = thread::spawn(move || -> Result<()> {
+            for h264 in [true, false] {
+                let (socket, _) = listener.accept()?;
+                let mut stream = StreamOwned::new(
+                    rustls::ServerConnection::new(config.clone())?,
+                    protocol::use_incoming(socket)?,
+                );
+                let hello: Hello = protocol::receive(&mut stream)?;
+                hello.verify(&pairing)?;
+                assert!(
+                    matches!(hello.request, Request::View { h264: offered, .. } if offered == h264)
+                );
+                if h264 {
+                    protocol::send(&mut stream, &Response::StreamingH264)?;
+                    protocol::send_h264_access_unit(&mut stream, &[0, 0, 1, 0xff])?;
+                } else {
+                    protocol::send(&mut stream, &Response::Streaming)?;
+                    Frame {
+                        width: 3,
+                        height: 2,
+                        bgra: vec![0; 24],
+                    }
+                    .send(&mut stream)?;
+                }
+            }
+            Ok(())
+        });
+        let updates = start_video(
+            host,
+            WindowInfo {
+                handle: 42,
+                process_id: 7,
+                title: "Janela de teste".into(),
+                process: "test.exe".into(),
+            },
+        );
+        let (observed, events) = mpsc::sync_channel(1);
+        let relay = thread::spawn(move || observed.send(updates.recv_blocking()));
+        let update = events.recv_timeout(Duration::from_secs(5))??;
+        assert!(matches!(update, Update::Image(frame) if (frame.width, frame.height) == (3, 2)));
+        relay.join().expect("video update relay panicked")?;
         server.join().expect("test host panicked")?;
         Ok(())
     }
