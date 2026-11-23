@@ -64,14 +64,15 @@ impl Host {
         }
     }
 
-    fn list(&self, launch: Option<LaunchApp>) -> Result<(Vec<WindowInfo>, Vec<LaunchApp>)> {
-        if let Some(app) = launch {
-            let (response, _) = self.request(Request::Launch(app))?;
-            if !matches!(response, Response::Launched) {
-                return Err("Resposta de abertura inesperada".into());
-            }
-            thread::sleep(Duration::from_millis(700));
+    fn launch(&self, app: LaunchApp) -> Result<()> {
+        let (response, _) = self.request(Request::Launch(app))?;
+        if !matches!(response, Response::Launched) {
+            return Err("Resposta de abertura inesperada".into());
         }
+        Ok(())
+    }
+
+    fn list(&self) -> Result<(Vec<WindowInfo>, Vec<LaunchApp>)> {
         let (response, _) = self
             .request(Request::ListCatalog)
             .or_else(|_| self.request(Request::List))?;
@@ -181,7 +182,7 @@ pub fn run() -> Result<()> {
                     discovered: BTreeMap::new(),
                     _discovery: watch_discovery(cx),
                 };
-                launcher.refresh(None, cx);
+                launcher.refresh(cx);
                 launcher
             });
             cx.new(|cx| Root::new(launcher, window, cx))
@@ -304,7 +305,7 @@ impl Launcher {
             }
         };
         if self.host.as_ref().is_some_and(|host| host.addr == addr) {
-            self.refresh(None, cx);
+            self.refresh(cx);
             return;
         }
         let (sender, receiver) = async_channel::bounded(2);
@@ -379,7 +380,7 @@ impl Launcher {
             Ok(host) => {
                 self.task = None;
                 self.host = Some(host);
-                self.refresh(None, cx);
+                self.refresh(cx);
             }
             Err(error) => self.status = format!("Falha ao salvar o pareamento · {error}"),
         }
@@ -488,7 +489,7 @@ impl Launcher {
         cx.notify();
     }
 
-    fn refresh(&mut self, launch: Option<LaunchApp>, cx: &mut Context<Self>) {
+    fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.task.is_some() {
             return;
         }
@@ -496,23 +497,13 @@ impl Launcher {
             return;
         };
         self.status = format!("Conectando a {}…", host.addr);
-        let request = cx
-            .background_executor()
-            .spawn(async move { host.list(launch) });
+        let request = cx.background_executor().spawn(async move { host.list() });
         self.task = Some(cx.spawn(async move |view, cx| {
             let result = request.await;
             let _ = view.update(cx, |this, cx| {
                 this.task = None;
                 match result {
-                    Ok((windows, apps)) => {
-                        this.status = match windows.len() {
-                            0 => "Nenhuma janela capturável encontrada".into(),
-                            1 => "1 janela disponível".into(),
-                            count => format!("{count} janelas disponíveis"),
-                        };
-                        this.windows = windows;
-                        this.launchable_apps = apps;
-                    }
+                    Ok((windows, apps)) => this.set_catalog(windows, apps),
                     Err(error) => {
                         this.status = format!("Falha na conexão · {error}");
                         this.windows.clear();
@@ -524,6 +515,78 @@ impl Launcher {
         }));
         cx.notify();
     }
+
+    fn set_catalog(&mut self, windows: Vec<WindowInfo>, apps: Vec<LaunchApp>) {
+        self.status = match windows.len() {
+            0 => "Nenhuma janela capturável encontrada".into(),
+            1 => "1 janela disponível".into(),
+            count => format!("{count} janelas disponíveis"),
+        };
+        self.windows = windows;
+        self.launchable_apps = apps;
+    }
+
+    fn launch_remote(&mut self, app: LaunchApp, window: &mut Window, cx: &mut Context<Self>) {
+        if self.task.is_some() {
+            return;
+        }
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        self.status = "Abrindo aplicativo no Windows…".into();
+        let request = cx.background_executor().spawn(async move {
+            let (before, _) = host.list()?;
+            host.launch(app)?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                thread::sleep(Duration::from_millis(400));
+                let (windows, apps) = host.list()?;
+                let candidate = launched_window(app, &before, &windows);
+                if candidate.is_some() || Instant::now() >= deadline {
+                    return Ok::<_, protocol::Error>((windows, apps, candidate));
+                }
+            }
+        });
+        self.task = Some(cx.spawn_in(window, async move |view, cx| {
+            let result = request.await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.task = None;
+                match result {
+                    Ok((windows, apps, candidate)) => {
+                        view.set_catalog(windows, apps);
+                        if let Some(candidate) = candidate {
+                            view.open_remote(candidate, window, cx);
+                        } else {
+                            view.status = "Selecione a janela do aplicativo para abrir.".into();
+                        }
+                    }
+                    Err(error) => view.status = format!("Falha ao abrir aplicativo · {error}"),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+}
+
+fn launched_window(
+    app: LaunchApp,
+    before: &[WindowInfo],
+    after: &[WindowInfo],
+) -> Option<WindowInfo> {
+    let process = match app {
+        LaunchApp::Explorer => "explorer.exe",
+        LaunchApp::Notepad => "notepad.exe",
+        LaunchApp::VsCode => "code.exe",
+    };
+    let mut fresh = after.iter().filter(|window| {
+        window.process.eq_ignore_ascii_case(process)
+            && !before
+                .iter()
+                .any(|old| (old.handle, old.process_id) == (window.handle, window.process_id))
+    });
+    let window = fresh.next()?;
+    fresh.next().is_none().then(|| window.clone())
 }
 
 fn button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
@@ -672,7 +735,7 @@ impl Render for Launcher {
                         .gap_2()
                         .child(
                             button("refresh", "Atualizar")
-                                .on_click(cx.listener(|this, _, _, cx| this.refresh(None, cx))),
+                                .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                         )
                         .children(
                             [
@@ -683,9 +746,11 @@ impl Render for Launcher {
                             .into_iter()
                             .filter(|(app, _, _)| self.launchable_apps.contains(app))
                             .map(|(app, id, label)| {
-                                button(id, label).on_click(cx.listener(move |view, _, _, cx| {
-                                    view.refresh(Some(app), cx);
-                                }))
+                                button(id, label).on_click(cx.listener(
+                                    move |view, _, window, cx| {
+                                        view.launch_remote(app, window, cx);
+                                    },
+                                ))
                             }),
                         )
                         .child(
@@ -1812,6 +1877,28 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
+    fn selects_only_an_unambiguous_new_window_of_the_launched_app() {
+        let window = |handle, process: &str| WindowInfo {
+            handle,
+            process_id: 42,
+            title: "Teste".into(),
+            process: process.into(),
+        };
+        let before = [window(1, "Code.exe")];
+        let after = [
+            window(1, "Code.exe"),
+            window(2, "explorer.exe"),
+            window(3, "CODE.EXE"),
+        ];
+        assert_eq!(
+            launched_window(LaunchApp::VsCode, &before, &after).map(|window| window.handle),
+            Some(3)
+        );
+        assert!(launched_window(LaunchApp::VsCode, &[], &after).is_none());
+        assert!(launched_window(LaunchApp::Notepad, &before, &after).is_none());
+    }
+
+    #[test]
     fn reads_launchable_catalog_and_falls_back_to_legacy_window_list() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = Endpoint::parse(&listener.local_addr()?.to_string())?;
@@ -1850,9 +1937,9 @@ mod tests {
             }
             Ok(())
         });
-        assert!(matches!(host.list(None)?.1.as_slice(), [LaunchApp::VsCode]));
+        assert!(matches!(host.list()?.1.as_slice(), [LaunchApp::VsCode]));
         assert!(matches!(
-            host.list(None)?.1.as_slice(),
+            host.list()?.1.as_slice(),
             [LaunchApp::Explorer, LaunchApp::Notepad]
         ));
         server.join().expect("test host panicked")?;
