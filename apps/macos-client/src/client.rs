@@ -820,6 +820,7 @@ fn read_video(
 ) -> Result<VideoEnd> {
     let mut report = VideoMetrics::default();
     let mut diagnostics = None;
+    let mut network_diagnostics = None;
     let socket = host.addr.connect(Duration::from_secs(8))?;
     let rtc = socket
         .lan_ip()
@@ -877,6 +878,7 @@ fn read_video(
                 }
                 let incoming = peer.poll();
                 if let Some(stats) = peer.take_network_stats() {
+                    network_diagnostics = Some(network_diagnostics_label(&stats));
                     let rtt = stats
                         .round_trip_time
                         .map_or("indisponível".into(), |value| {
@@ -958,7 +960,10 @@ fn read_video(
                     encoder,
                 )
             {
-                diagnostics = Some(summary);
+                diagnostics = Some(match network_diagnostics.as_deref() {
+                    Some(network) => format!("{summary} · {network}").into(),
+                    None => summary,
+                });
             }
             let frame = packet.frame;
             let mut pixels = frame.bgra;
@@ -1022,6 +1027,19 @@ fn monitor_rtc_control(
         }
     });
     control
+}
+
+fn network_diagnostics_label(stats: &protocol::rtc::NetworkStats) -> String {
+    let mut label = "WebRTC".to_owned();
+    if let Some(rtt) = stats.round_trip_time {
+        use std::fmt::Write;
+        let _ = write!(label, " · RTT {:.1} ms", rtt.as_secs_f64() * 1_000.);
+    }
+    if let Some(loss) = stats.ingress_loss {
+        use std::fmt::Write;
+        let _ = write!(label, " · perda {:.1}%", loss * 100.);
+    }
+    label
 }
 
 struct VideoMetrics {
