@@ -1986,6 +1986,40 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
+    fn changing_the_address_does_not_send_credentials_to_a_different_certificate() -> Result<()> {
+        use std::io::Read;
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = Endpoint::parse(&listener.local_addr()?.to_string())?;
+        let (trusted, _) = protocol::new_identity()?;
+        let (untrusted, key) = protocol::new_identity()?;
+        let server_config = Arc::new(untrusted.server_config(key)?);
+        let original = Host::from_profile(ConnectionProfile {
+            address: Endpoint::parse("127.0.0.1:47651")?,
+            pairing: trusted,
+        })?;
+
+        let server = thread::spawn(move || -> Result<()> {
+            let (socket, _) = listener.accept()?;
+            let mut tls = StreamOwned::new(
+                rustls::ServerConnection::new(server_config)?,
+                protocol::use_incoming(socket)?,
+            );
+            let mut application_byte = [0; 1];
+            assert!(!matches!(tls.read(&mut application_byte), Ok(1)));
+            Ok(())
+        });
+        assert!(
+            original
+                .at_address(address)?
+                .request(Request::List)
+                .is_err()
+        );
+        server.join().expect("test host panicked")?;
+        Ok(())
+    }
+
+    #[test]
     fn selects_only_an_unambiguous_new_window_of_the_launched_app() {
         let window = |handle, process: &str| WindowInfo {
             handle,
