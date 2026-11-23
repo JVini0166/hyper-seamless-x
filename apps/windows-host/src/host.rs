@@ -288,6 +288,7 @@ struct CaptureQueue {
     newest: Mutex<Option<CapturedPacket>>,
     dropped: AtomicU32,
     force_keyframe: AtomicBool,
+    interval_ms: AtomicU32,
 }
 
 enum CapturedPacket {
@@ -329,7 +330,8 @@ impl GraphicsCaptureApiHandler for Capture {
         _: InternalCaptureControl,
     ) -> Result<()> {
         let started = Instant::now();
-        if self.last.elapsed() < Duration::from_millis(33) {
+        let interval_ms = self.latest.interval_ms.load(Ordering::Relaxed).max(33);
+        if self.last.elapsed() < Duration::from_millis(u64::from(interval_ms)) {
             self.latest.dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
@@ -471,6 +473,9 @@ fn capture(
         while !control.is_finished() && !stop.load(Ordering::Acquire) {
             if let Some(peer) = rtc.as_mut() {
                 peer.poll()?;
+                if let Some(interval_ms) = peer.capture_interval_ms() {
+                    latest.interval_ms.store(interval_ms, Ordering::Relaxed);
+                }
                 if peer.take_keyframe_request()
                     && last_keyframe_request
                         .is_none_or(|last: Instant| last.elapsed() >= Duration::from_millis(500))
