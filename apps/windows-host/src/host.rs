@@ -593,6 +593,7 @@ fn capture(
                     let bitrate_limit = latest.bitrate_limit.load(Ordering::Relaxed);
                     let encode_start = Instant::now();
                     let encoded = encode_h264_frame(&mut encoder, &frame, bitrate_limit);
+                    let encode_micros = protocol::duration_micros(encode_start.elapsed());
                     match encoded {
                         Ok((unit, mode)) => {
                             if let Some(peer) = rtc.as_mut() {
