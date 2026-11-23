@@ -1483,23 +1483,40 @@ impl RemoteView {
                 return;
             }
             view.resize_task = Some(cx.spawn_in(window, async move |view, cx| {
-                loop {
+                let requested = loop {
                     cx.background_executor()
                         .timer(Duration::from_millis(150))
                         .await;
-                    let waiting = view.update_in(cx, |view, window, cx| {
+                    match view.update_in(cx, |view, window, cx| {
                         if native_live_resize(window) {
-                            return true;
+                            return None;
                         }
                         if let Some((width, height)) = view.remote_resize_target(window) {
                             view.queue(protocol::InputEvent::Resize { width, height }, cx);
+                            return Some(true);
                         }
-                        false
-                    });
-                    if !matches!(waiting, Ok(true)) {
-                        break;
+                        Some(false)
+                    }) {
+                        Ok(None) => continue,
+                        Ok(Some(requested)) => break requested,
+                        Err(_) => return,
                     }
+                };
+                if !requested {
+                    return;
                 }
+                // Windows can retain the previous dimensions when an app enforces its size limit.
+                cx.background_executor()
+                    .timer(Duration::from_millis(1250))
+                    .await;
+                let _ = view.update_in(cx, |view, window, _| {
+                    if !native_live_resize(window)
+                        && view.remote_resize_target(window).is_some()
+                        && let Some(frame) = &view.frame
+                    {
+                        set_native_geometry(window, frame.width, frame.height);
+                    }
+                });
             }));
         });
         if window.is_window_active() {
