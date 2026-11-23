@@ -287,6 +287,7 @@ fn control_window(window: Window, action: WindowAction) -> Result<()> {
 struct CaptureQueue {
     newest: Mutex<Option<CapturedPacket>>,
     dropped: AtomicU32,
+    force_keyframe: AtomicBool,
 }
 
 enum CapturedPacket {
@@ -393,6 +394,7 @@ impl GraphicsCaptureApiHandler for Capture {
 
 impl Capture {
     fn encode_gpu(&mut self, frame: &CaptureFrame, width: u32, height: u32) -> Result<Vec<u8>> {
+        let force_keyframe = self.latest.force_keyframe.swap(false, Ordering::AcqRel);
         let first = !self
             .gpu_encoder
             .as_ref()
@@ -410,7 +412,7 @@ impl Capture {
             .gpu_encoder
             .as_mut()
             .ok_or("Encoder NVENC indisponível")?
-            .encode_capture_texture(frame.as_raw_texture())?;
+            .encode_capture_texture(frame.as_raw_texture(), force_keyframe)?;
         if first && !crate::h264::ready_to_decode(&unit) {
             return Err("Primeiro quadro NVENC sem parâmetros H.264".into());
         }
@@ -465,9 +467,17 @@ fn capture(
         }
         let mut last_write = Instant::now();
         let mut last_heartbeat = Instant::now();
+        let mut last_keyframe_request = None;
         while !control.is_finished() && !stop.load(Ordering::Acquire) {
             if let Some(peer) = rtc.as_mut() {
                 peer.poll()?;
+                if peer.take_keyframe_request()
+                    && last_keyframe_request
+                        .is_none_or(|last: Instant| last.elapsed() >= Duration::from_millis(500))
+                {
+                    latest.force_keyframe.store(true, Ordering::Release);
+                    last_keyframe_request = Some(Instant::now());
+                }
                 if !peer.ready() {
                     break;
                 }
@@ -503,6 +513,9 @@ fn capture(
             if let Some(CapturedPacket::Raw(frame, capture_micros)) = frame {
                 let dropped = latest.dropped.swap(0, Ordering::Relaxed);
                 if h264_enabled {
+                    if latest.force_keyframe.swap(false, Ordering::AcqRel) {
+                        encoder = None;
+                    }
                     let encoded = encode_h264_frame(&mut encoder, &frame);
                     match encoded {
                         Ok((unit, mode)) => {

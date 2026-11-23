@@ -163,6 +163,11 @@ impl Decoder {
     }
 }
 
+pub fn contains_idr(unit: &[u8]) -> bool {
+    unit.windows(4)
+        .any(|bytes| bytes[..3] == [0, 0, 1] && bytes[3] & 0x1f == 5)
+}
+
 fn annex_b_nals(unit: &[u8]) -> Result<Vec<&[u8]>> {
     let mut starts = unit
         .windows(3)

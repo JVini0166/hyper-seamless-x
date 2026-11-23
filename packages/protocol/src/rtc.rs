@@ -9,7 +9,7 @@ use std::{
 use str0m::{
     Candidate, Event, Input, Output, Rtc, RtcConfig,
     change::{SdpAnswer, SdpOffer, SdpPendingOffer},
-    media::{Direction, MediaData, MediaKind, MediaTime, Mid},
+    media::{Direction, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid},
     net::{Protocol, Receive},
 };
 
@@ -20,6 +20,7 @@ pub struct VideoPeer {
     started: Instant,
     video: Option<Mid>,
     receive: Vec<u8>,
+    keyframe_requested: bool,
 }
 
 impl VideoPeer {
@@ -40,6 +41,7 @@ impl VideoPeer {
             started,
             video: None,
             receive: vec![0; 65_536],
+            keyframe_requested: false,
         })
     }
 
@@ -89,6 +91,20 @@ impl VideoPeer {
         Ok(())
     }
 
+    pub fn request_keyframe(&mut self) -> Result<()> {
+        let mid = self.video.ok_or("Trilha de vídeo WebRTC indisponível")?;
+        let mut writer = self
+            .rtc
+            .writer(mid)
+            .ok_or("Trilha de vídeo WebRTC encerrada")?;
+        writer.request_keyframe(None, KeyframeRequestKind::Pli)?;
+        Ok(())
+    }
+
+    pub fn take_keyframe_request(&mut self) -> bool {
+        std::mem::take(&mut self.keyframe_requested)
+    }
+
     /// Drains protocol work and returns at most one complete access unit per call.
     pub fn poll(&mut self) -> Result<Option<MediaData>> {
         let mut remaining_receives = 64;
@@ -104,6 +120,11 @@ impl VideoPeer {
                 }
                 Output::Event(Event::MediaData(data)) if Some(data.mid) == self.video => {
                     return Ok(Some(data));
+                }
+                Output::Event(Event::KeyframeRequest(request))
+                    if Some(request.mid) == self.video =>
+                {
+                    self.keyframe_requested = true;
                 }
                 Output::Event(_) => {}
                 Output::Timeout(deadline) => {
@@ -153,6 +174,7 @@ mod tests {
         let sample = include_bytes!("../../../tests/fixtures/red-32x24.h264");
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut sent = false;
+        let mut requested = false;
         while Instant::now() < deadline {
             host.poll()?;
             if let Some(frame) = client.poll()? {
@@ -162,6 +184,10 @@ mod tests {
                         .windows(5)
                         .any(|nal| { nal[..4] == [0, 0, 0, 1] && nal[4] & 0x1f == 5 })
                 );
+                client.request_keyframe()?;
+                requested = true;
+            }
+            if requested && host.take_keyframe_request() {
                 return Ok(());
             }
             if !sent && host.ready() && client.ready() {
@@ -170,6 +196,6 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(2));
         }
-        Err("O par WebRTC não recebeu o quadro H.264".into())
+        Err("O par WebRTC não completou o envio de H.264 e o pedido de quadro-chave".into())
     }
 }

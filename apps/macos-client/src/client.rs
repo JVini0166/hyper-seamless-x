@@ -788,14 +788,32 @@ fn read_video(
         _ => return Err("Resposta de captura inesperada".into()),
     };
     let startup_deadline = Instant::now() + Duration::from_secs(4);
+    let mut keyframe_wait = None;
     while !updates.is_closed() {
         let packet = if let Some(h264_decoder) = &mut decoder {
             let unit = if let Some((peer, control)) = rtc.as_mut() {
-                if control.is_closed() || (!*delivered && Instant::now() >= startup_deadline) {
+                let now = Instant::now();
+                if control.is_closed()
+                    || (!*delivered && now >= startup_deadline)
+                    || keyframe_wait.is_some_and(|deadline| now >= deadline)
+                {
                     return Ok(VideoEnd::RtcUnavailable);
                 }
                 match peer.poll() {
-                    Ok(Some(data)) => Some(data.data),
+                    Ok(Some(data)) => {
+                        let discontinuity = !data.contiguous || keyframe_wait.is_some();
+                        if discontinuity && !crate::h264::contains_idr(&data.data) {
+                            if keyframe_wait.is_none() {
+                                if peer.request_keyframe().is_err() {
+                                    return Ok(VideoEnd::RtcUnavailable);
+                                }
+                                keyframe_wait = Some(now + Duration::from_secs(3));
+                            }
+                            continue;
+                        }
+                        keyframe_wait = None;
+                        Some(data.data)
+                    }
                     Ok(None) => {
                         thread::sleep(Duration::from_millis(2));
                         None

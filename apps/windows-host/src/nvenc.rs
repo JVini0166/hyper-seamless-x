@@ -229,14 +229,18 @@ impl Encoder {
                 0,
             );
         }
-        self.encode_uploaded()
+        self.encode_uploaded(false)
     }
 
     pub fn matches(&self, width: u32, height: u32) -> bool {
         (self.width, self.height) == (width, height)
     }
 
-    pub fn encode_capture_texture(&mut self, source: &ID3D11Texture2D) -> Result<Vec<u8>> {
+    pub fn encode_capture_texture(
+        &mut self,
+        source: &ID3D11Texture2D,
+        force_keyframe: bool,
+    ) -> Result<Vec<u8>> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { source.GetDesc(&mut desc) };
         if desc.Width < self.width
@@ -259,15 +263,15 @@ impl Encoder {
             self.context
                 .CopySubresourceRegion(&self.texture, 0, 0, 0, 0, source, 0, Some(&region))
         };
-        self.encode_uploaded()
+        self.encode_uploaded(force_keyframe)
     }
 
-    fn encode_uploaded(&mut self) -> Result<Vec<u8>> {
+    fn encode_uploaded(&mut self, force_keyframe: bool) -> Result<Vec<u8>> {
         let mut input: NV_ENC_MAP_INPUT_RESOURCE = unsafe { std::mem::zeroed() };
         input.version = self.version.map_input_resource_ver();
         input.registeredResource = self.registered;
         nv_call!(self.api, nvEncMapInputResource, self.session, &mut input)?;
-        let result = self.encode_mapped(&input);
+        let result = self.encode_mapped(&input, force_keyframe);
         let cleanup = nv_call!(
             self.api,
             nvEncUnmapInputResource,
@@ -280,7 +284,11 @@ impl Encoder {
         Ok(unit)
     }
 
-    fn encode_mapped(&self, input: &NV_ENC_MAP_INPUT_RESOURCE) -> Result<Vec<u8>> {
+    fn encode_mapped(
+        &self,
+        input: &NV_ENC_MAP_INPUT_RESOURCE,
+        force_keyframe: bool,
+    ) -> Result<Vec<u8>> {
         let mut picture: NV_ENC_PIC_PARAMS = unsafe { std::mem::zeroed() };
         picture.version = self.version.pic_params_ver();
         picture.inputWidth = self.width;
@@ -293,7 +301,7 @@ impl Encoder {
         picture.frameIdx = self.frame_index;
         picture.inputTimeStamp = u64::from(self.frame_index) * 333_333;
         picture.inputDuration = 333_333;
-        if self.frame_index.is_multiple_of(60) {
+        if force_keyframe || self.frame_index.is_multiple_of(60) {
             picture.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
         }
         nv_call!(self.api, nvEncEncodePicture, self.session, &mut picture)?;
