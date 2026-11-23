@@ -97,6 +97,7 @@ struct HostPanel {
     addresses: Vec<(String, Ipv4Addr)>,
     sharing: Option<Sharing>,
     status: String,
+    tunnel_lookup: Option<Task<()>>,
 }
 
 impl HostPanel {
@@ -105,6 +106,7 @@ impl HostPanel {
             addresses: Vec::new(),
             sharing: None,
             status: String::new(),
+            tunnel_lookup: None,
         };
         panel.refresh();
         panel
@@ -144,7 +146,7 @@ impl HostPanel {
             Ok(server) => {
                 self.status = if ip.is_loopback() {
                     format!(
-                        "Túnel local ativo em {address}. Use o endereço público do túnel no Mac."
+                        "Host local em {address}. Use no Mac o link do túnel que encaminha para esse endereço."
                     )
                 } else {
                     format!("Compartilhando em {address}")
@@ -192,6 +194,31 @@ impl HostPanel {
             }
             Err(error) => self.status = format!("Falha ao iniciar · {error}"),
         }
+        cx.notify();
+    }
+
+    fn copy_ngrok_address(&mut self, cx: &mut Context<Self>) {
+        if self.tunnel_lookup.is_some() {
+            return;
+        }
+        self.status = "Buscando endereço no agente ngrok local…".into();
+        let request = cx
+            .background_executor()
+            .spawn(async { crate::tunnel::ngrok_address() });
+        self.tunnel_lookup = Some(cx.spawn(async move |view, cx| {
+            let result = request.await;
+            let _ = view.update(cx, |view, cx| {
+                view.tunnel_lookup = None;
+                match result {
+                    Ok(address) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(address.clone()));
+                        view.status = format!("{address} copiado. Cole esse endereço no Mac.");
+                    }
+                    Err(error) => view.status = error.to_string(),
+                }
+                cx.notify();
+            });
+        }));
         cx.notify();
     }
 
@@ -336,8 +363,18 @@ impl Render for HostPanel {
                                         }),
                                     ))
                                 })
+                                .when(address.ip().is_loopback(), |bar| {
+                                    bar.child(
+                                        button("copy-ngrok", "Copiar link do ngrok").on_click(
+                                            cx.listener(|view, _, _, cx| {
+                                                view.copy_ngrok_address(cx)
+                                            }),
+                                        ),
+                                    )
+                                })
                                 .child(button("stop", "Parar compartilhamento").on_click(
                                     cx.listener(|this, _, _, cx| {
+                                        this.tunnel_lookup = None;
                                         this.sharing = None;
                                         this.refresh();
                                         cx.notify();

@@ -7,6 +7,8 @@ mod host;
 #[cfg(windows)]
 mod nvenc;
 #[cfg(windows)]
+mod tunnel;
+#[cfg(windows)]
 mod ui;
 
 #[cfg(windows)]
