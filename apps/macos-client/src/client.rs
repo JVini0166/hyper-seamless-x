@@ -1233,11 +1233,12 @@ impl RemoteView {
                     .await;
                 if view
                     .update_in(cx, |_, window, _| {
-                        let cursor = window.mouse_position();
-                        let within_top = cursor.x >= px(0.)
-                            && cursor.x < window.viewport_size().width
-                            && cursor.y >= px(0.)
-                            && cursor.y < px(if visible { 36. } else { 9. });
+                        let within_top = window.is_window_active()
+                            && cursor_in_titlebar(
+                                window.mouse_position(),
+                                window.viewport_size().width,
+                                visible,
+                            );
                         if within_top != visible {
                             set_native_buttons(window, within_top);
                             visible = within_top;
@@ -1264,6 +1265,16 @@ impl RemoteView {
             input_error: None,
         }
     }
+}
+
+fn cursor_in_titlebar(
+    cursor: gpui::Point<gpui::Pixels>,
+    width: gpui::Pixels,
+    buttons_visible: bool,
+) -> bool {
+    // The reveal strip is narrow. Keep the controls visible while moving down to click them.
+    let height = px(if buttons_visible { 36. } else { 9. });
+    cursor.x >= px(0.) && cursor.x < width && cursor.y >= px(0.) && cursor.y < height
 }
 
 fn remote_options(launcher: &Window, title: &str, frame: &VideoFrame, cx: &App) -> WindowOptions {
@@ -1590,6 +1601,18 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn reveals_native_buttons_at_the_top_and_keeps_them_clickable() {
+        let hit = |x, y, visible| cursor_in_titlebar(point(px(x), px(y)), px(650.), visible);
+        assert!(hit(120., 0., false));
+        assert!(hit(120., 8., false));
+        assert!(!hit(120., 9., false));
+        assert!(hit(25., 25., true));
+        assert!(!hit(25., 36., true));
+        assert!(!hit(25., -1., true));
+        assert!(!hit(650., 1., true));
+    }
 
     #[test]
     fn open_video_resumes_after_tls_transport_disconnects() -> Result<()> {
