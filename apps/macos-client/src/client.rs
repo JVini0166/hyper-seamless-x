@@ -1747,19 +1747,23 @@ fn set_native_buttons(window: &Window, visible: bool) {
     }
 }
 
+fn viewport_pixels(window: &Window) -> (u32, u32) {
+    let viewport = window.viewport_size();
+    let scale = f64::from(window.scale_factor());
+    (
+        (viewport.width.to_f64() * scale).round() as u32,
+        (viewport.height.to_f64() * scale).round() as u32,
+    )
+}
+
 impl RemoteView {
     fn remote_resize_target(&self, window: &Window) -> Option<(u32, u32)> {
         let frame = self.frame.as_ref()?;
         if window.is_fullscreen() || window.is_maximized() || !window.is_window_active() {
             return None;
         }
-        let viewport = window.viewport_size();
-        let scale = f64::from(window.scale_factor());
-        let width = (viewport.width.to_f64() * scale).round() as u32;
-        let height = (viewport.height.to_f64() * scale).round() as u32;
-        (width >= 64
-            && height >= 64
-            && (width.abs_diff(frame.width) > 1 || height.abs_diff(frame.height) > 1))
+        let (width, height) = viewport_pixels(window);
+        (width >= 64 && height >= 64 && (width, height) != (frame.width, frame.height))
             .then_some((width, height))
     }
 
@@ -1893,14 +1897,10 @@ impl Render for RemoteView {
             .as_ref()
             .filter(|_| self.show_diagnostics)
             .map(|frame| {
-                let viewport = window.viewport_size();
-                let scale = f64::from(window.scale_factor());
+                let (width, height) = viewport_pixels(window);
                 format!(
-                    "Windows {} × {} px · Área no Mac {:.0} × {:.0} px",
-                    frame.width,
-                    frame.height,
-                    viewport.width.to_f64() * scale,
-                    viewport.height.to_f64() * scale,
+                    "Windows {} × {} px · Área no Mac {width} × {height} px",
+                    frame.width, frame.height,
                 )
             });
         div()
