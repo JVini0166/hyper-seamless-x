@@ -739,6 +739,7 @@ fn read_video(
         metrics,
         h264: true,
     })?;
+    let mut encoder = None;
     let mut decoder = match response {
         Response::Streaming => None,
         Response::StreamingH264 => Some(crate::h264::Decoder::default()),
@@ -749,6 +750,11 @@ fn read_video(
             if let Some(unit) = protocol::receive_h264_access_unit(&mut stream)? {
                 if unit == protocol::H264_SWITCH_TO_BGRA {
                     decoder = None;
+                    encoder = None;
+                    continue;
+                }
+                if let Some(mode) = protocol::EncoderMode::from_marker(&unit) {
+                    encoder = Some(mode);
                     continue;
                 }
                 let started = Instant::now();
@@ -772,6 +778,7 @@ fn read_video(
                     info.handle,
                     &packet,
                     decoder.as_ref().map(crate::h264::Decoder::mode),
+                    encoder,
                 );
             }
             let frame = packet.frame;
@@ -830,6 +837,7 @@ impl VideoMetrics {
         window: u64,
         packet: &protocol::ReceivedFrame,
         mode: Option<crate::h264::DecoderMode>,
+        encoder: Option<protocol::EncoderMode>,
     ) {
         self.frames += 1;
         self.bytes += packet.compressed_bytes as u64;
@@ -860,8 +868,16 @@ impl VideoMetrics {
             Some(crate::h264::DecoderMode::Unreported) => "videotoolbox-unreported",
             None => "zstd",
         };
+        let encoder = encoder.map_or(
+            if mode.is_some() {
+                "h264-unreported"
+            } else {
+                "zstd"
+            },
+            protocol::EncoderMode::label,
+        );
         eprintln!(
-            "video window={window} decoder={decoder} received_fps={:.1} compressed_kbps={:.0} decode_us={} {host}",
+            "video window={window} encoder={encoder} decoder={decoder} received_fps={:.1} compressed_kbps={:.0} decode_us={} {host}",
             self.frames as f64 / seconds,
             self.bytes as f64 * 0.008 / seconds,
             self.decode / self.frames
@@ -1370,6 +1386,10 @@ mod tests {
                 ));
                 if use_h264 {
                     protocol::send(&mut stream, &Response::StreamingH264)?;
+                    protocol::send_h264_access_unit(
+                        &mut stream,
+                        protocol::EncoderMode::MediaFoundation.marker(),
+                    )?;
                     protocol::send_h264_access_unit(
                         &mut stream,
                         include_bytes!("../../../tests/fixtures/red-32x24.h264"),

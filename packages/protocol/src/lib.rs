@@ -333,6 +333,37 @@ impl Frame {
 
 const MAX_H264_ACCESS_UNIT: usize = 16 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderMode {
+    NvencGpuCopy,
+    NvencUpload,
+    MediaFoundation,
+}
+
+impl EncoderMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NvencGpuCopy => "nvenc-gpu-copy",
+            Self::NvencUpload => "nvenc-upload",
+            Self::MediaFoundation => "media-foundation",
+        }
+    }
+
+    pub fn marker(self) -> &'static [u8] {
+        match self {
+            Self::NvencGpuCopy => b"HSX:ENCODER:NVENC-GPU",
+            Self::NvencUpload => b"HSX:ENCODER:NVENC-UPLOAD",
+            Self::MediaFoundation => b"HSX:ENCODER:MEDIA-FOUNDATION",
+        }
+    }
+
+    pub fn from_marker(packet: &[u8]) -> Option<Self> {
+        [Self::NvencGpuCopy, Self::NvencUpload, Self::MediaFoundation]
+            .into_iter()
+            .find(|mode| mode.marker() == packet)
+    }
+}
+
 /// A negotiated H.264 stream can switch once to the BGRA fallback.
 pub const H264_SWITCH_TO_BGRA: &[u8] = b"HSX:BGRA";
 

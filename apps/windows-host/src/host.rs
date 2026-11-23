@@ -434,6 +434,7 @@ fn capture(
     let result = (|| {
         let mut announced = !h264;
         let mut h264_enabled = h264;
+        let mut last_encoder = None;
         let mut encoder: Option<crate::h264::Encoder> = None;
         if announced {
             protocol::send(stream, &Response::Streaming)?;
@@ -450,7 +451,13 @@ fn capture(
                     protocol::send(stream, &Response::StreamingH264)?;
                     announced = true;
                 }
-                protocol::send_h264_access_unit(stream, unit)?;
+                send_h264(
+                    stream,
+                    unit,
+                    protocol::EncoderMode::NvencGpuCopy,
+                    metrics,
+                    &mut last_encoder,
+                )?;
                 last_write = Instant::now();
                 continue;
             }
@@ -459,12 +466,12 @@ fn capture(
                 if h264_enabled {
                     let encoded = encode_h264_frame(&mut encoder, &frame);
                     match encoded {
-                        Ok(unit) => {
+                        Ok((unit, mode)) => {
                             if !announced {
                                 protocol::send(stream, &Response::StreamingH264)?;
                                 announced = true;
                             }
-                            protocol::send_h264_access_unit(stream, &unit)?;
+                            send_h264(stream, &unit, mode, metrics, &mut last_encoder)?;
                             last_write = Instant::now();
                             continue;
                         }
@@ -501,7 +508,10 @@ fn capture(
     result.and_then(|()| Ok(stop?))
 }
 
-fn encode_h264_frame(encoder: &mut Option<crate::h264::Encoder>, frame: &Frame) -> Result<Vec<u8>> {
+fn encode_h264_frame(
+    encoder: &mut Option<crate::h264::Encoder>,
+    frame: &Frame,
+) -> Result<(Vec<u8>, protocol::EncoderMode)> {
     if !encoder
         .as_ref()
         .is_some_and(|encoder| encoder.matches(frame))
@@ -510,10 +520,23 @@ fn encode_h264_frame(encoder: &mut Option<crate::h264::Encoder>, frame: &Frame) 
         *encoder = None;
         *encoder = Some(crate::h264::Encoder::new(frame.width, frame.height)?);
     }
-    encoder
-        .as_mut()
-        .ok_or("Encoder indisponível")?
-        .encode(frame)
+    let encoder = encoder.as_mut().ok_or("Encoder indisponível")?;
+    let packet = encoder.encode(frame)?;
+    Ok((packet, encoder.mode()))
+}
+
+fn send_h264(
+    stream: &mut Stream,
+    unit: &[u8],
+    mode: protocol::EncoderMode,
+    metrics: bool,
+    last: &mut Option<protocol::EncoderMode>,
+) -> Result<()> {
+    if metrics && *last != Some(mode) {
+        protocol::send_h264_access_unit(stream, mode.marker())?;
+        *last = Some(mode);
+    }
+    protocol::send_h264_access_unit(stream, unit)
 }
 
 fn click_window(window: Window, x: u16, y: u16, button: protocol::PointerButton) -> Result<()> {

@@ -140,6 +140,13 @@ impl Encoder {
         (self.width, self.height) == (frame.width, frame.height)
     }
 
+    pub fn mode(&self) -> protocol::EncoderMode {
+        match self.backend {
+            Backend::Nvidia(_) => protocol::EncoderMode::NvencUpload,
+            Backend::MediaFoundation(_) => protocol::EncoderMode::MediaFoundation,
+        }
+    }
+
     pub fn encode(&mut self, frame: &Frame) -> Result<Vec<u8>> {
         match &mut self.backend {
             Backend::Nvidia(encoder) => {

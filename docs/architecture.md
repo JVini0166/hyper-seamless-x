@@ -36,6 +36,6 @@ Em um Windows com Media Foundation, execute `cargo test --locked -p windows-host
 
 ## Diagnóstico de vídeo
 
-Para instrumentar uma sessão de desenvolvimento no Mac, abra o cliente pelo terminal com `HSX_METRICS=1` e selecione uma janela. O cliente registra amostras por janela em stderr quando recebe vídeo. O campo `decoder` distingue Zstandard, VideoToolbox por hardware, VideoToolbox por software e modo indeterminado quando o sistema não informa a escolha. O host envia informações adicionais somente quando a sessão as solicita.
+Para instrumentar uma sessão de desenvolvimento no Mac, abra o cliente pelo terminal com `HSX_METRICS=1` e selecione uma janela. O cliente registra amostras por janela em stderr quando recebe vídeo. O campo `encoder` identifica NVENC com cópia na GPU, NVENC com upload pela CPU, Media Foundation ou Zstandard. O campo `decoder` distingue Zstandard, VideoToolbox por hardware, VideoToolbox por software e modo indeterminado quando o sistema não informa a escolha. O host envia informações adicionais somente quando a sessão as solicita.
 
 A amostra inclui quadros recebidos por segundo, bitrate do payload comprimido, tempo médio de descompressão Zstandard, tempo médio de compressão e leitura do buffer de captura no Windows e contagem de quadros ignorados ou sobrescritos no host. A leitura do buffer mede o trabalho no callback. Medições de transporte unidirecional, apresentação na tela, latência total e uso de recursos exigem instrumentação adicional.
