@@ -1096,3 +1096,88 @@ impl Render for RemoteView {
             )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    #[test]
+    fn open_video_resumes_after_tls_transport_disconnects() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let address = Endpoint::parse(&listener.local_addr()?.to_string())?;
+        let (pairing, key) = protocol::new_identity()?;
+        let config = Arc::new(pairing.server_config(key)?);
+        let host = Host::from_profile(ConnectionProfile {
+            address,
+            pairing: pairing.clone(),
+        })?;
+        let server = thread::spawn(move || -> Result<()> {
+            for width in [2, 3] {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                };
+                let mut stream = StreamOwned::new(
+                    rustls::ServerConnection::new(config.clone())?,
+                    protocol::use_incoming(socket)?,
+                );
+                let hello: Hello = protocol::receive(&mut stream)?;
+                hello.verify(&pairing)?;
+                assert!(matches!(
+                    hello.request,
+                    Request::View {
+                        handle: 42,
+                        process_id: 7
+                    }
+                ));
+                protocol::send(&mut stream, &Response::Streaming)?;
+                Frame {
+                    width,
+                    height: 1,
+                    bgra: vec![0; width as usize * 4],
+                }
+                .send(&mut stream)?;
+                // Dropping the socket without close_notify simulates a cut transport.
+            }
+            Ok(())
+        });
+
+        let updates = start_video(
+            host,
+            WindowInfo {
+                handle: 42,
+                process_id: 7,
+                title: "Janela de teste".into(),
+                process: "test.exe".into(),
+            },
+        );
+        let (observed, events) = mpsc::sync_channel(4);
+        let relay = thread::spawn(move || {
+            while let Ok(update) = updates.recv_blocking() {
+                let done = matches!(&update, Update::Image(frame) if frame.width == 3);
+                if observed.send(update).is_err() || done {
+                    break;
+                }
+            }
+        });
+        let next = || events.recv_timeout(Duration::from_secs(5));
+        assert!(matches!(next()?, Update::Image(frame) if frame.width == 2));
+        assert!(matches!(next()?, Update::Reconnecting(_)));
+        assert!(matches!(next()?, Update::Image(frame) if frame.width == 3));
+        relay.join().expect("video update relay panicked");
+        server.join().expect("test host panicked")?;
+        Ok(())
+    }
+}

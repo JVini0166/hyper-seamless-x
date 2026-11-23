@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable
-      - run: cargo test --locked -p protocol
+      - run: cargo test --locked -p protocol -p macos-client
       - run: ./scripts/package-macos.sh
       - uses: actions/upload-artifact@v4
         with:
