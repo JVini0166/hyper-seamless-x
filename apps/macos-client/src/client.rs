@@ -1254,11 +1254,25 @@ impl RemoteView {
     fn key_down(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
         use protocol::RemoteKey::*;
         let stroke = &event.keystroke;
-        if self.frame.is_none()
-            || stroke.modifiers.platform
-            || stroke.modifiers.control
-            || stroke.modifiers.function
-        {
+        let modifiers = stroke.modifiers;
+        if self.frame.is_none() || modifiers.function {
+            return;
+        }
+        if modifiers.platform || modifiers.control {
+            use protocol::EditingShortcut::*;
+            let shortcut = match (stroke.key.as_str(), modifiers.shift) {
+                ("a", false) => SelectAll,
+                ("c", false) => Copy,
+                ("x", false) => Cut,
+                ("v", false) => Paste,
+                ("z", false) => Undo,
+                ("y", false) | ("z", true) => Redo,
+                _ => return,
+            };
+            if !modifiers.alt {
+                cx.stop_propagation();
+                self.queue(protocol::InputEvent::Key(EditingShortcut(shortcut)), cx);
+            }
             return;
         }
         let key = match stroke.key.as_str() {

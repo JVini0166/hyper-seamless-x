@@ -658,6 +658,7 @@ fn send_key(window: Window, key: protocol::RemoteKey) -> Result<()> {
     let _guard = INPUT_LOCK.lock().map_err(|_| "Entrada indisponível")?;
     let hwnd = window.as_raw_hwnd();
     let expected_pid = window.process_id()?;
+    let is_shortcut = matches!(key, EditingShortcut(_));
     let inputs = match key {
         Text(value) => {
             if value.is_empty() || value.len() > 32 || value.chars().any(char::is_control) {
@@ -667,6 +668,20 @@ fn send_key(window: Window, key: protocol::RemoteKey) -> Result<()> {
                 .encode_utf16()
                 .flat_map(|unit| keyboard_pair(0, unit, KEYEVENTF_UNICODE))
                 .collect::<Vec<_>>()
+        }
+        EditingShortcut(shortcut) => {
+            use protocol::EditingShortcut::*;
+            let vk = match shortcut {
+                SelectAll => VK_A,
+                Copy => VK_C,
+                Cut => VK_X,
+                Paste => VK_V,
+                Undo => VK_Z,
+                Redo => VK_Y,
+            };
+            let [control_down, control_up] = keyboard_pair(VK_CONTROL, 0, 0);
+            let [key_down, key_up] = keyboard_pair(vk, 0, 0);
+            vec![control_down, key_down, key_up, control_up]
         }
         key => {
             let vk = match key {
@@ -683,7 +698,7 @@ fn send_key(window: Window, key: protocol::RemoteKey) -> Result<()> {
                 End => VK_END,
                 PageUp => VK_PRIOR,
                 PageDown => VK_NEXT,
-                Text(_) => unreachable!(),
+                Text(_) | EditingShortcut(_) => unreachable!(),
             };
             keyboard_pair(vk, 0, 0).to_vec()
         }
@@ -703,7 +718,13 @@ fn send_key(window: Window, key: protocol::RemoteKey) -> Result<()> {
             size_of::<INPUT>() as i32,
         ) as usize;
         if sent != inputs.len() {
-            if sent % 2 == 1 {
+            if is_shortcut {
+                if sent == 2 {
+                    SendInput(2, inputs[2..].as_ptr(), size_of::<INPUT>() as i32);
+                } else if sent != 0 {
+                    SendInput(1, &inputs[3], size_of::<INPUT>() as i32);
+                }
+            } else if sent % 2 == 1 {
                 SendInput(1, &inputs[sent], size_of::<INPUT>() as i32);
             }
             return Err("O Windows recusou o evento de teclado".into());

@@ -148,6 +148,17 @@ pub enum RemoteKey {
     End,
     PageUp,
     PageDown,
+    EditingShortcut(EditingShortcut),
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum EditingShortcut {
+    SelectAll,
+    Copy,
+    Cut,
+    Paste,
+    Undo,
+    Redo,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
