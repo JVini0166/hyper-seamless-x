@@ -1711,7 +1711,6 @@ fn set_native_geometry(window: &Window, width: u32, height: u32) {
     if let Some(native) = appkit_window(window) {
         unsafe {
             let pixels = NSSize::new(f64::from(width), f64::from(height));
-            let _: () = msg_send![native.as_ptr(), setContentAspectRatio: pixels];
             if !window.is_fullscreen() {
                 let backing_scale: f64 = msg_send![native.as_ptr(), backingScaleFactor];
                 let frame: NSRect = msg_send![native.as_ptr(), frame];
