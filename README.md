@@ -13,7 +13,9 @@ Baixe a mesma versão do host para Windows x64 e do cliente para Mac Apple Silic
 5. Passe o cursor pela borda superior da transmissão para revelar os três botões nativos do macOS. O conteúdo capturado preserva a aparência do aplicativo Windows.
 6. No Windows, clique em **Parar compartilhamento** para encerrar as transmissões.
 
-O launcher do Mac mostra atalhos para o Explorador, o Bloco de Notas e o VS Code quando o host encontra os aplicativos nas pastas padrão do Windows. Se o atalho abrir uma única nova janela do aplicativo, ela aparece automaticamente no Mac. A lista é atualizada enquanto o launcher está em primeiro plano. Ative **Diagnósticos nas novas janelas** para exibir FPS recebidos, bitrate e tempo de decodificação na próxima transmissão. Com WebRTC, a janela também mostra a latência de ida e volta e a perda de pacotes quando há amostras da rede.
+O launcher do Mac mostra atalhos para o Explorador, o Bloco de Notas, o VS Code e o Visual Studio quando o host encontra os aplicativos nas pastas padrão do Windows. Se o atalho abrir uma única nova janela do aplicativo, ela aparece automaticamente no Mac. A lista é atualizada enquanto o launcher está em primeiro plano.
+
+Ative **Diagnósticos nas novas janelas** para comparar as dimensões em pixels do quadro Windows e da área de exibição no Mac. O painel também exibe FPS recebidos, bitrate e tempo de decodificação. Com WebRTC, mostra a latência de ida e volta e a perda de pacotes quando há amostras da rede.
 
 ## Endereço de conexão
 
