@@ -7,7 +7,7 @@ pub struct ManagedNgrok(std::process::Child);
 
 #[cfg(windows)]
 impl ManagedNgrok {
-    pub fn start(selected: Option<&std::path::Path>) -> Result<Self> {
+    pub fn start(selected: Option<&std::path::Path>, authtoken: Option<&str>) -> Result<Self> {
         use std::{
             net::{Ipv4Addr, SocketAddr, TcpStream},
             os::windows::process::CommandExt,
@@ -32,7 +32,11 @@ impl ManagedNgrok {
                 .ok_or("Use Selecionar ngrok.exe para localizar o agente no Windows")?
         };
         let upstream = format!("http://127.0.0.1:{DEFAULT_PORT}");
-        let process = Command::new(executable)
+        let mut command = Command::new(executable);
+        if let Some(authtoken) = authtoken {
+            command.env("NGROK_AUTHTOKEN", authtoken);
+        }
+        let process = command
             .args(["http", &upstream, "--inspect=false"])
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())

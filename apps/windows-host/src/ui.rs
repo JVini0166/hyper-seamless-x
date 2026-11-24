@@ -106,6 +106,7 @@ struct HostPanel {
     tunnel_lookup: Option<Task<()>>,
     ngrok: Option<crate::tunnel::ManagedNgrok>,
     ngrok_executable: Option<PathBuf>,
+    ngrok_authtoken: Option<String>,
 }
 
 impl HostPanel {
@@ -118,6 +119,7 @@ impl HostPanel {
             tunnel_lookup: None,
             ngrok: None,
             ngrok_executable: None,
+            ngrok_authtoken: None,
         };
         panel.refresh();
         panel
@@ -212,7 +214,10 @@ impl HostPanel {
         if self.ngrok.is_some() || self.tunnel_lookup.is_some() {
             return;
         }
-        match crate::tunnel::ManagedNgrok::start(self.ngrok_executable.as_deref()) {
+        match crate::tunnel::ManagedNgrok::start(
+            self.ngrok_executable.as_deref(),
+            self.ngrok_authtoken.as_deref(),
+        ) {
             Ok(process) => {
                 self.ngrok = Some(process);
                 self.find_ngrok_address(true, cx);
@@ -222,6 +227,29 @@ impl HostPanel {
                 cx.notify();
             }
         }
+    }
+
+    fn toggle_ngrok_token(&mut self, cx: &mut Context<Self>) {
+        if self.ngrok_authtoken.take().is_some() {
+            self.status = "Token removido desta sessão.".into();
+        } else {
+            let pasted = cx.read_from_clipboard().and_then(|item| item.text());
+            let token = pasted.as_deref().unwrap_or_default().trim();
+            if (16..=256).contains(&token.len())
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                self.ngrok_authtoken = Some(token.to_owned());
+                self.status =
+                    "Token recebido para esta sessão. Clique em Iniciar túnel público.".into();
+            } else {
+                self.status =
+                    "Copie somente o token de autenticação do painel do ngrok e tente novamente."
+                        .into();
+            }
+        }
+        cx.notify();
     }
 
     fn select_ngrok(&mut self, cx: &mut Context<Self>) {
@@ -447,8 +475,16 @@ impl Render for HostPanel {
                                     )
                                 })
                                 .when(address.ip().is_loopback() && self.ngrok.is_none(), |bar| {
+                                    let token_label = if self.ngrok_authtoken.is_some() {
+                                        "Remover token da sessão"
+                                    } else {
+                                        "Colar token do ngrok"
+                                    };
                                     bar.child(button("select-ngrok", "Selecionar ngrok.exe").on_click(
                                         cx.listener(|view, _, _, cx| view.select_ngrok(cx)),
+                                    ))
+                                    .child(button("ngrok-token", token_label).on_click(
+                                        cx.listener(|view, _, _, cx| view.toggle_ngrok_token(cx)),
                                     ))
                                     .child(button("start-ngrok", "Iniciar túnel público").on_click(
                                         cx.listener(|view, _, _, cx| view.start_ngrok(cx)),
@@ -473,6 +509,7 @@ impl Render for HostPanel {
                                     cx.listener(|this, _, _, cx| {
                                         this.tunnel_lookup = None;
                                         this.ngrok = None;
+                                        this.ngrok_authtoken = None;
                                         this.sharing = None;
                                         this.refresh();
                                         cx.notify();
