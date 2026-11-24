@@ -29,6 +29,21 @@ struct Host {
     config: Arc<ClientConfig>,
 }
 
+#[derive(Debug)]
+struct HostUnreachable(protocol::Error);
+
+impl std::fmt::Display for HostUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Não foi possível acessar o endereço do Windows · {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HostUnreachable {}
+
 impl Host {
     fn from_profile(profile: ConnectionProfile) -> Result<Self> {
         Ok(Self {
@@ -46,7 +61,10 @@ impl Host {
     }
 
     fn request(&self, request: Request) -> Result<(Response, StreamOwned<ClientConnection, Wire>)> {
-        let socket = self.addr.connect(Duration::from_secs(8))?;
+        let socket = self
+            .addr
+            .connect(Duration::from_secs(8))
+            .map_err(HostUnreachable)?;
         self.request_on(socket, request)
     }
 
@@ -82,8 +100,20 @@ impl Host {
     fn list(&self) -> Result<(Vec<WindowInfo>, Vec<LaunchApp>)> {
         let (response, _) = self
             .request(Request::ListCatalogV2)
-            .or_else(|_| self.request(Request::ListCatalog))
-            .or_else(|_| self.request(Request::List))?;
+            .or_else(|error| {
+                if error.is::<HostUnreachable>() {
+                    Err(error)
+                } else {
+                    self.request(Request::ListCatalog)
+                }
+            })
+            .or_else(|error| {
+                if error.is::<HostUnreachable>() {
+                    Err(error)
+                } else {
+                    self.request(Request::List)
+                }
+            })?;
         match response {
             Response::WindowCatalog { windows, apps } => Ok((windows, apps)),
             Response::Windows(windows) => {
@@ -399,6 +429,9 @@ impl Launcher {
                                     view.status = format!("Falha ao salvar endereço · {error}")
                                 }
                             }
+                        }
+                        Err(error) if error.is::<HostUnreachable>() => {
+                            view.status = error.to_string();
                         }
                         Err(_) => view.begin_enrollment(addr, cx),
                     }
