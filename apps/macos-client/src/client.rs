@@ -1789,20 +1789,35 @@ fn viewport_pixels(window: &Window) -> (u32, u32) {
     )
 }
 
-fn exact_image_size(window: &Window, frame: &VideoFrame) -> Option<gpui::Size<gpui::Pixels>> {
-    let (width, height) = viewport_pixels(window);
+fn exact_image_bounds(
+    (width, height): (u32, u32),
+    (image_width, image_height): (u32, u32),
+    scale: f32,
+) -> Option<Bounds<gpui::Pixels>> {
     // AppKit can round the window out to a whole point on a Retina display.
     // In that case, keep the image at its original pixel size, anchored at the top left.
-    if !(frame.width..=frame.width + 1).contains(&width)
-        || !(frame.height..=frame.height + 1).contains(&height)
+    if !(image_width..=image_width + 1).contains(&width)
+        || !(image_height..=image_height + 1).contains(&height)
     {
         return None;
     }
-    let scale = window.scale_factor();
-    Some(size(
-        px(frame.width as f32 / scale),
-        px(frame.height as f32 / scale),
+    Some(Bounds::new(
+        point(px(0.), px(0.)),
+        size(
+            px(image_width as f32 / scale),
+            px(image_height as f32 / scale),
+        ),
     ))
+}
+
+fn normalized_pointer(
+    position: gpui::Point<gpui::Pixels>,
+    image: Bounds<gpui::Pixels>,
+) -> Option<(u16, u16)> {
+    let x = (position.x - image.origin.x).to_f64() / image.size.width.to_f64();
+    let y = (position.y - image.origin.y).to_f64() / image.size.height.to_f64();
+    ((0. ..1.).contains(&x) && (0. ..1.).contains(&y))
+        .then(|| ((x * 65535.).round() as u16, (y * 65535.).round() as u16))
 }
 
 impl RemoteView {
@@ -1834,11 +1849,12 @@ impl RemoteView {
         window: &Window,
     ) -> Option<(u16, u16)> {
         let frame = self.frame.as_ref()?;
-        if let Some(image) = exact_image_size(window, frame) {
-            let x = position.x.to_f64() / image.width.to_f64();
-            let y = position.y.to_f64() / image.height.to_f64();
-            return ((0. ..1.).contains(&x) && (0. ..1.).contains(&y))
-                .then(|| ((x * 65535.).round() as u16, (y * 65535.).round() as u16));
+        if let Some(image) = exact_image_bounds(
+            viewport_pixels(window),
+            (frame.width, frame.height),
+            window.scale_factor(),
+        ) {
+            return normalized_pointer(position, image);
         }
         let viewport = window.viewport_size();
         let (width, height) = (f64::from(frame.width), f64::from(frame.height));
@@ -2011,14 +2027,18 @@ impl Render for RemoteView {
             .bg(rgb(0x101722))
             .text_color(rgb(0xe8edf5))
             .when_some(self.frame.clone(), |view, frame| {
-                if let Some(exact) = exact_image_size(window, &frame) {
+                if let Some(exact) = exact_image_bounds(
+                    viewport_pixels(window),
+                    (frame.width, frame.height),
+                    window.scale_factor(),
+                ) {
                     // GPUI layout rounds element sizes to points. Set the fractional size in paint.
                     view.child(
                         canvas(
                             |_, _, _| (),
                             move |bounds, (), window, _| {
                                 let _ = window.paint_image(
-                                    Bounds::new(bounds.origin, exact),
+                                    Bounds::new(bounds.origin, exact.size),
                                     Default::default(),
                                     frame.image,
                                     0,
@@ -2077,6 +2097,20 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn odd_retina_frame_keeps_its_size_and_excludes_the_extra_pixel() {
+        let image = exact_image_bounds((1300, 738), (1299, 737), 2.).unwrap();
+        assert_eq!(image.size, size(px(649.5), px(368.5)));
+        assert_eq!(
+            normalized_pointer(point(px(0.), px(0.)), image),
+            Some((0, 0))
+        );
+        assert!(normalized_pointer(point(px(649.), px(368.)), image).is_some());
+        assert_eq!(normalized_pointer(point(px(649.5), px(368.)), image), None);
+        assert_eq!(normalized_pointer(point(px(649.), px(368.5)), image), None);
+        assert!(exact_image_bounds((1400, 738), (1299, 737), 2.).is_none());
+    }
 
     #[test]
     fn changing_the_address_does_not_send_credentials_to_a_different_certificate() -> Result<()> {
