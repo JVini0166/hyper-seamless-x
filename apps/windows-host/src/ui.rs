@@ -196,6 +196,7 @@ impl HostPanel {
                                     sharing.state = state;
                                     cx.notify();
                                 }
+                                this.check_ngrok(cx);
                                 true
                             });
                             if !updated.unwrap_or(false) {
@@ -227,6 +228,21 @@ impl HostPanel {
                 cx.notify();
             }
         }
+    }
+
+    fn check_ngrok(&mut self, cx: &mut Context<Self>) {
+        let Some(process) = &mut self.ngrok else {
+            return;
+        };
+        let status = match process.try_wait() {
+            Ok(None) => return,
+            Ok(Some(status)) => format!("O ngrok encerrou · {status}"),
+            Err(error) => format!("Falha ao acompanhar o agente ngrok · {error}"),
+        };
+        self.tunnel_lookup = None;
+        self.ngrok = None;
+        self.status = format!("{status}. O host local continua disponível.");
+        cx.notify();
     }
 
     fn toggle_ngrok_token(&mut self, cx: &mut Context<Self>) {

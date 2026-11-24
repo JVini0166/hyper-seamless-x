@@ -45,6 +45,10 @@ impl ManagedNgrok {
             .spawn()?;
         Ok(Self(process))
     }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0.try_wait()
+    }
 }
 
 #[cfg(windows)]
