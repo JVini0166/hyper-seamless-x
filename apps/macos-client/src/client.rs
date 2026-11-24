@@ -1513,8 +1513,21 @@ impl RemoteView {
                 view.queue(protocol::InputEvent::Focus, cx);
             }
         });
-        let bounds = cx.observe_window_bounds(window, |view, window, cx| {
+        let mut backing_scale = window.scale_factor();
+        let bounds = cx.observe_window_bounds(window, move |view, window, cx| {
+            let scale_changed = backing_scale != window.scale_factor();
+            backing_scale = window.scale_factor();
             if !native_live_resize(window) {
+                if scale_changed {
+                    cx.on_next_frame(window, |view, window, _| {
+                        if !native_live_resize(window)
+                            && !window.is_maximized()
+                            && let Some(frame) = &view.frame
+                        {
+                            set_native_geometry(window, frame.width, frame.height);
+                        }
+                    });
+                }
                 return;
             }
             view.resize_task = Some(cx.spawn_in(window, async move |view, cx| {
