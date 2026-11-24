@@ -11,7 +11,7 @@ impl ManagedNgrok {
         use std::{
             net::{Ipv4Addr, SocketAddr, TcpStream},
             os::windows::process::CommandExt,
-            process::{Command, Stdio},
+            process::Stdio,
         };
         use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
@@ -31,13 +31,7 @@ impl ManagedNgrok {
                 .find(|path| valid_executable(path))
                 .ok_or("Use Selecionar ngrok.exe para localizar o agente no Windows")?
         };
-        let upstream = format!("http://127.0.0.1:{DEFAULT_PORT}");
-        let mut command = Command::new(executable);
-        if let Some(authtoken) = authtoken {
-            command.env("NGROK_AUTHTOKEN", authtoken);
-        }
-        let process = command
-            .args(["http", &upstream, "--inspect=false"])
+        let process = agent_command(&executable, authtoken)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -49,6 +43,17 @@ impl ManagedNgrok {
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         self.0.try_wait()
     }
+}
+
+#[cfg(any(windows, test))]
+fn agent_command(executable: &std::path::Path, authtoken: Option<&str>) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
+    let upstream = format!("http://127.0.0.1:{DEFAULT_PORT}");
+    command.args(["http", &upstream, "--inspect=false"]);
+    if let Some(authtoken) = authtoken {
+        command.env("NGROK_AUTHTOKEN", authtoken);
+    }
+    command
 }
 
 #[cfg(windows)]
@@ -129,6 +134,21 @@ fn select_endpoint(catalog: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passes_the_token_only_in_the_agent_environment() {
+        let executable = std::path::Path::new("ngrok.exe");
+        let command = agent_command(executable, Some("ngrok_pat_test_value"));
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["http", "http://127.0.0.1:47651", "--inspect=false"]
+        );
+        let (key, value) = command.get_envs().next().unwrap();
+        assert_eq!(key, "NGROK_AUTHTOKEN");
+        assert_eq!(value.unwrap(), "ngrok_pat_test_value");
+        assert_eq!(agent_command(executable, None).get_envs().count(), 0);
+    }
 
     #[test]
     fn selects_only_an_endpoint_forwarding_to_the_local_host() {
