@@ -988,7 +988,9 @@ fn pointer_window(
         if GetForegroundWindow() != hwnd {
             SetForegroundWindow(hwnd);
         }
-        let offset = |value, length| (i64::from(value) * i64::from(length - 1) / 65535) as i32;
+        // Coordinates are fractions across the image, so divide the full extent
+        // into pixel bins. This keeps the last pixel reachable at its center.
+        let offset = |value, length| (i64::from(value) * i64::from(length) / 65536) as i32;
         let window_point = |x, y| POINT {
             x: rect.left + offset(x, rect.right - rect.left),
             y: rect.top + offset(y, rect.bottom - rect.top),
