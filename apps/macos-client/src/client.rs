@@ -2089,7 +2089,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_launchable_catalog_and_falls_back_to_legacy_window_list() -> Result<()> {
+    fn reads_current_and_legacy_window_catalogs() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = Endpoint::parse(&listener.local_addr()?.to_string())?;
         let (pairing, key) = protocol::new_identity()?;
@@ -2107,6 +2107,14 @@ mod tests {
                     Some(Response::WindowCatalog {
                         windows: vec![],
                         apps: vec![LaunchApp::VsCode, LaunchApp::VisualStudio],
+                    }),
+                ),
+                ("ListCatalogV2", None),
+                (
+                    "ListCatalog",
+                    Some(Response::WindowCatalog {
+                        windows: vec![],
+                        apps: vec![LaunchApp::VsCode],
                     }),
                 ),
                 ("ListCatalogV2", None),
@@ -2131,6 +2139,7 @@ mod tests {
             host.list()?.1.as_slice(),
             [LaunchApp::VsCode, LaunchApp::VisualStudio]
         ));
+        assert!(matches!(host.list()?.1.as_slice(), [LaunchApp::VsCode]));
         assert!(matches!(
             host.list()?.1.as_slice(),
             [LaunchApp::Explorer, LaunchApp::Notepad]
