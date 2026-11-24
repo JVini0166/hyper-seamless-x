@@ -643,12 +643,18 @@ impl Launcher {
             return;
         };
         self.status = "Abrindo aplicativo no Windows…".into();
-        let request = cx.background_executor().spawn(async move {
+        let executor = cx.background_executor().clone();
+        let request = executor.clone().spawn(async move {
             let (before, _) = host.list()?;
             host.launch(app)?;
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let (timeout, interval) = if app == LaunchApp::VisualStudio {
+                (Duration::from_secs(45), Duration::from_secs(1))
+            } else {
+                (Duration::from_secs(5), Duration::from_millis(400))
+            };
+            let deadline = Instant::now() + timeout;
             loop {
-                thread::sleep(Duration::from_millis(400));
+                executor.timer(interval).await;
                 let (windows, apps) = host.list()?;
                 let candidate = launched_window(app, &before, &windows);
                 if candidate.is_some() || Instant::now() >= deadline {
