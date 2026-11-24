@@ -1,7 +1,7 @@
 use crate::host;
 use gpui::{
-    App, Application, Bounds, ClipboardItem, Context, Render, Task, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, ClipboardItem, Context, PathPromptOptions, Render, Task,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use protocol::{DEFAULT_PORT, PairingState};
 use std::{
@@ -105,6 +105,7 @@ struct HostPanel {
     status: String,
     tunnel_lookup: Option<Task<()>>,
     ngrok: Option<crate::tunnel::ManagedNgrok>,
+    ngrok_executable: Option<PathBuf>,
 }
 
 impl HostPanel {
@@ -116,6 +117,7 @@ impl HostPanel {
             status: String::new(),
             tunnel_lookup: None,
             ngrok: None,
+            ngrok_executable: None,
         };
         panel.refresh();
         panel
@@ -210,7 +212,7 @@ impl HostPanel {
         if self.ngrok.is_some() || self.tunnel_lookup.is_some() {
             return;
         }
-        match crate::tunnel::ManagedNgrok::start() {
+        match crate::tunnel::ManagedNgrok::start(self.ngrok_executable.as_deref()) {
             Ok(process) => {
                 self.ngrok = Some(process);
                 self.find_ngrok_address(true, cx);
@@ -220,6 +222,34 @@ impl HostPanel {
                 cx.notify();
             }
         }
+    }
+
+    fn select_ngrok(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Selecionar ngrok.exe".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let Ok(result) = paths.await else { return };
+            let _ = view.update(cx, |view, cx| {
+                match result {
+                    Ok(Some(paths)) => match paths.into_iter().next() {
+                        Some(path) if crate::tunnel::valid_executable(&path) => {
+                            view.ngrok_executable = Some(path);
+                            view.status =
+                                "ngrok.exe selecionado. Clique em Iniciar túnel público.".into();
+                        }
+                        _ => view.status = "Selecione o arquivo ngrok.exe no Windows.".into(),
+                    },
+                    Ok(None) => return,
+                    Err(error) => view.status = format!("Falha ao selecionar ngrok.exe · {error}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn find_ngrok_address(&mut self, starting: bool, cx: &mut Context<Self>) {
@@ -417,7 +447,10 @@ impl Render for HostPanel {
                                     )
                                 })
                                 .when(address.ip().is_loopback() && self.ngrok.is_none(), |bar| {
-                                    bar.child(button("start-ngrok", "Iniciar túnel público").on_click(
+                                    bar.child(button("select-ngrok", "Selecionar ngrok.exe").on_click(
+                                        cx.listener(|view, _, _, cx| view.select_ngrok(cx)),
+                                    ))
+                                    .child(button("start-ngrok", "Iniciar túnel público").on_click(
                                         cx.listener(|view, _, _, cx| view.start_ngrok(cx)),
                                     ))
                                 })

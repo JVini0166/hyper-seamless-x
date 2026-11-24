@@ -7,7 +7,7 @@ pub struct ManagedNgrok(std::process::Child);
 
 #[cfg(windows)]
 impl ManagedNgrok {
-    pub fn start() -> Result<Self> {
+    pub fn start(selected: Option<&std::path::Path>) -> Result<Self> {
         use std::{
             net::{Ipv4Addr, SocketAddr, TcpStream},
             os::windows::process::CommandExt,
@@ -19,12 +19,18 @@ impl ManagedNgrok {
         if TcpStream::connect_timeout(&inspection, Duration::from_millis(150)).is_ok() {
             return Err("Já há um processo na porta de inspeção do ngrok. Use Copiar link do ngrok se o túnel já estiver configurado.".into());
         }
-        let path = std::env::var_os("PATH").ok_or("ngrok.exe não encontrado no PATH do Windows")?;
-        let executable = std::env::split_paths(&path)
-            .filter(|path| path.is_absolute())
-            .map(|path| path.join("ngrok.exe"))
-            .find(|path| path.is_file())
-            .ok_or("ngrok.exe não encontrado no PATH do Windows")?;
+        let executable = if let Some(selected) = selected {
+            if !valid_executable(selected) {
+                return Err("Selecione o arquivo ngrok.exe no Windows".into());
+            }
+            selected.to_path_buf()
+        } else {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            std::env::split_paths(&path)
+                .map(|path| path.join("ngrok.exe"))
+                .find(|path| valid_executable(path))
+                .ok_or("Use Selecionar ngrok.exe para localizar o agente no Windows")?
+        };
         let upstream = format!("http://127.0.0.1:{DEFAULT_PORT}");
         let process = Command::new(executable)
             .args(["http", &upstream, "--inspect=false"])
@@ -35,6 +41,15 @@ impl ManagedNgrok {
             .spawn()?;
         Ok(Self(process))
     }
+}
+
+#[cfg(windows)]
+pub fn valid_executable(path: &std::path::Path) -> bool {
+    path.is_absolute()
+        && path
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("ngrok.exe"))
+        && path.is_file()
 }
 
 #[cfg(windows)]
