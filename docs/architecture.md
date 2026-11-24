@@ -1,8 +1,8 @@
 # Arquitetura
 
 - `apps/windows-host` enumera janelas capturáveis com Windows Graphics Capture e cria uma sessão de captura por janela selecionada. Cada sessão mantém apenas o quadro mais recente fora do transporte.
-- `apps/macos-client` usa GPUI para o launcher e uma janela nativa por transmissão. A leitura e descompressão executam fora da thread da interface. O primeiro quadro determina as dimensões iniciais, ajustadas à escala do monitor e à área útil disponível.
-- `packages/protocol` contém os transportes TCP e WebSocket e as mensagens versionadas de autenticação, pareamento e vídeo.
+- `apps/macos-client` usa GPUI para o launcher e uma janela nativa por transmissão. A leitura e a decodificação acontecem fora da thread da interface. O primeiro quadro determina as dimensões iniciais em pixels físicos. Se o AppKit arredondar a área da janela em Retina, a imagem preserva os pixels de origem e a posição dos cliques acompanha a área desenhada.
+- `packages/protocol` contém os transportes WebRTC, TCP e WebSocket e as mensagens versionadas de autenticação, pareamento e vídeo.
 
 ## Descoberta local
 
@@ -17,6 +17,10 @@ O host usa uma identidade persistente. Para revogar o acesso de todos os cliente
 O host aceita TLS diretamente na porta TCP ou dentro de mensagens WebSocket binárias em `/hyper-seamless-x`. Para túnel HTTP ou HTTPS, execute o agente de túnel no Windows e aponte para `127.0.0.1:47651` enquanto o host estiver no modo **Usar túnel local**. Para um agente TCP, cole o endereço TCP atribuído pelo serviço no cliente.
 
 Mensagens JSON têm um prefixo de tamanho de 32 bits em ordem de rede. Após a confirmação de captura o fluxo contém pacotes binários. Cada quadro traz largura e altura em ordem de rede seguidas por BGRA comprimido em Zstandard. Um pacote vazio mantém a sessão ativa em janelas estáticas. Uma sessão TLS autenticada e vinculada à janela confirma eventos de entrada em ordem. O cliente reabre a sessão após inatividade, descarta eventos antigos da fila e evita reenviar comandos cujo sucesso seja incerto. A captura exige um HWND e o PID correspondente, conferidos contra a lista atual.
+
+## Seleção do transporte de vídeo
+
+Em TCP direto na LAN, o cliente tenta primeiro WebRTC com candidatos ICE locais em UDP. A oferta e a resposta passam pelo canal TLS autenticado. O vídeo H.264 usa SRTP, enquanto o controle continua em TLS. Se o caminho UDP falhar, o cliente abre um fluxo TLS de vídeo. Links HTTP ou HTTPS usam WebSocket como transporte externo para o TLS e o vídeo. O fallback BGRA com Zstandard conserva as dimensões do quadro quando a codificação H.264 falha.
 
 ## Recepção de H.264
 
