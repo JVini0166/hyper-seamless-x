@@ -1021,6 +1021,7 @@ struct RemoteView {
     drag_origin: Option<gpui::Point<gpui::Pixels>>,
     input_error: Option<String>,
     diagnostics: Option<SharedString>,
+    paint_latency: Option<Duration>,
     show_diagnostics: bool,
 }
 
@@ -1623,6 +1624,7 @@ impl RemoteView {
                             }
                             Update::Reconnecting(message) => {
                                 this.diagnostics = None;
+                                this.paint_latency = None;
                                 this.reconnecting = Some(message);
                                 this.input_error = None;
                             }
@@ -1685,6 +1687,7 @@ impl RemoteView {
             drag_origin: None,
             input_error: None,
             diagnostics: None,
+            paint_latency: None,
             show_diagnostics,
         }
     }
@@ -2012,6 +2015,8 @@ impl RemoteView {
 
 impl Render for RemoteView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view_handle = cx.weak_entity();
+        let show_diagnostics = self.show_diagnostics;
         let dimensions = self
             .frame
             .as_ref()
@@ -2084,7 +2089,7 @@ impl Render for RemoteView {
                 view.child(
                     canvas(
                         |_, _, _| (),
-                        move |bounds, (), window, _| {
+                        move |bounds, (), window, cx| {
                             let image_bounds = exact.map_or_else(
                                 || ObjectFit::Contain.get_bounds(bounds, frame.image.size(0)),
                                 |exact| Bounds::new(bounds.origin, exact.size),
@@ -2100,11 +2105,24 @@ impl Render for RemoteView {
                                 && let Some(sample) = frame.paint_sample
                             {
                                 sample.reported.call_once(|| {
+                                    let latency = sample.decoded_at.elapsed();
                                     eprintln!(
                                         "video_paint window={} decode_to_paint_us={}",
                                         sample.window,
-                                        sample.decoded_at.elapsed().as_micros(),
+                                        latency.as_micros(),
                                     );
+                                    if show_diagnostics {
+                                        cx.defer(move |cx| {
+                                            let _ = view_handle.update(cx, |view, cx| {
+                                                if view.reconnecting.is_none()
+                                                    && view.frame.is_some()
+                                                {
+                                                    view.paint_latency = Some(latency);
+                                                    cx.notify();
+                                                }
+                                            });
+                                        });
+                                    }
                                 });
                             }
                         },
@@ -2126,6 +2144,12 @@ impl Render for RemoteView {
                         .child(div().child(dimensions))
                         .when_some(self.diagnostics.clone(), |panel, diagnostics| {
                             panel.child(div().child(diagnostics))
+                        })
+                        .when_some(self.paint_latency, |panel, latency| {
+                            panel.child(div().child(format!(
+                                "Da decodificação ao renderizador · {:.1} ms",
+                                latency.as_secs_f64() * 1000.,
+                            )))
                         }),
                 )
             })
