@@ -48,4 +48,6 @@ Em fluxos H.264 por TCP ou WebSocket, o cliente pode solicitar uma amostra de te
 
 As linhas `video_network` registram o RTT do par ICE selecionado e a perda de pacotes recebidos no WebRTC, quando disponíveis. O RTT mede uma ida e volta na rede. A latência da imagem desde a captura até a apresentação exige uma medição separada.
 
+As linhas `video_paint` medem do fim da decodificação até a submissão do quadro ao renderizador GPUI. O valor inclui a espera na fila do cliente e a preparação da imagem. A apresentação da imagem pelo compositor e pelo monitor exige instrumentação separada.
+
 Para medir a decodificação local em um Mac, execute `cargo test --locked --release -p macos-client benchmark_4k_decode -- --ignored --nocapture`. A rotina aquece o VideoToolbox e mede 120 decodificações de um quadro-chave sintético de 4096 × 2160. Os tempos incluem a entrega do quadro em BGRA à memória do cliente. Captura, rede e apresentação na tela exigem medições próprias.

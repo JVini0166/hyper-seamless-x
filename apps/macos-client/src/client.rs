@@ -1,7 +1,7 @@
 use gpui::{
     App, Application, Bounds, Context, Entity, ObjectFit, Render, RenderImage, SharedString,
     Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, canvas,
-    div, img, point, prelude::*, px, rgb, size,
+    div, point, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Root, Theme, ThemeMode,
@@ -17,7 +17,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Once},
     thread,
     time::{Duration, Instant},
 };
@@ -1030,6 +1030,13 @@ struct VideoFrame {
     width: u32,
     height: u32,
     diagnostics: Option<SharedString>,
+    paint_sample: Option<Arc<PaintSample>>,
+}
+
+struct PaintSample {
+    window: u64,
+    decoded_at: Instant,
+    reported: Once,
 }
 
 enum Update {
@@ -1188,7 +1195,8 @@ fn read_video(
             Frame::receive_with_metrics(stream.as_mut().ok_or("Fluxo TLS indisponível")?)?
         };
         if let Some(packet) = packet {
-            if metrics
+            let mut paint_sample = None;
+            if let Some(decoded_at) = metrics.then(Instant::now)
                 && let Some(summary) = report.record(
                     info.handle,
                     &packet,
@@ -1200,6 +1208,11 @@ fn read_video(
                     Some(network) => format!("{summary} · {network}").into(),
                     None => summary,
                 });
+                paint_sample = Some(Arc::new(PaintSample {
+                    window: info.handle,
+                    decoded_at,
+                    reported: Once::new(),
+                }));
             }
             let frame = packet.frame;
             let mut pixels = frame.bgra;
@@ -1218,6 +1231,7 @@ fn read_video(
                     width: frame.width,
                     height: frame.height,
                     diagnostics: diagnostics.clone(),
+                    paint_sample,
                 }))
                 .is_err()
             {
@@ -2062,30 +2076,41 @@ impl Render for RemoteView {
             .bg(rgb(0x101722))
             .text_color(rgb(0xe8edf5))
             .when_some(self.frame.clone(), |view, frame| {
-                if let Some(exact) = exact_image_bounds(
+                let exact = exact_image_bounds(
                     viewport_pixels(window),
                     (frame.width, frame.height),
                     window.scale_factor(),
-                ) {
-                    // GPUI layout rounds element sizes to points. Set the fractional size in paint.
-                    view.child(
-                        canvas(
-                            |_, _, _| (),
-                            move |bounds, (), window, _| {
-                                let _ = window.paint_image(
-                                    Bounds::new(bounds.origin, exact.size),
-                                    Default::default(),
-                                    frame.image,
-                                    0,
-                                    false,
-                                );
-                            },
-                        )
-                        .size_full(),
+                );
+                view.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, _| {
+                            let image_bounds = exact.map_or_else(
+                                || ObjectFit::Contain.get_bounds(bounds, frame.image.size(0)),
+                                |exact| Bounds::new(bounds.origin, exact.size),
+                            );
+                            let painted = window.paint_image(
+                                image_bounds,
+                                Default::default(),
+                                frame.image,
+                                0,
+                                false,
+                            );
+                            if painted.is_ok()
+                                && let Some(sample) = frame.paint_sample
+                            {
+                                sample.reported.call_once(|| {
+                                    eprintln!(
+                                        "video_paint window={} decode_to_paint_us={}",
+                                        sample.window,
+                                        sample.decoded_at.elapsed().as_micros(),
+                                    );
+                                });
+                            }
+                        },
                     )
-                } else {
-                    view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
-                }
+                    .size_full(),
+                )
             })
             .when_some(dimensions, |view, dimensions| {
                 view.child(
