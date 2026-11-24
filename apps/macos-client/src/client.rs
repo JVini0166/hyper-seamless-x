@@ -1,7 +1,7 @@
 use gpui::{
     App, Application, Bounds, Context, Entity, ObjectFit, Render, RenderImage, SharedString,
-    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div,
-    img, point, prelude::*, px, rgb, size,
+    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, canvas,
+    div, img, point, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Root, Theme, ThemeMode,
@@ -2011,18 +2011,26 @@ impl Render for RemoteView {
             .bg(rgb(0x101722))
             .text_color(rgb(0xe8edf5))
             .when_some(self.frame.clone(), |view, frame| {
-                let exact_size = exact_image_size(window, &frame);
-                let image = img(frame.image).object_fit(ObjectFit::Contain);
-                view.child(if let Some(exact) = exact_size {
-                    image
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .w(exact.width)
-                        .h(exact.height)
+                if let Some(exact) = exact_image_size(window, &frame) {
+                    // GPUI layout rounds element sizes to points. Set the fractional size in paint.
+                    view.child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, (), window, _| {
+                                let _ = window.paint_image(
+                                    Bounds::new(bounds.origin, exact),
+                                    Default::default(),
+                                    frame.image,
+                                    0,
+                                    false,
+                                );
+                            },
+                        )
+                        .size_full(),
+                    )
                 } else {
-                    image.size_full()
-                })
+                    view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
+                }
             })
             .when_some(dimensions, |view, dimensions| {
                 view.child(
