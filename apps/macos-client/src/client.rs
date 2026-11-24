@@ -1789,6 +1789,22 @@ fn viewport_pixels(window: &Window) -> (u32, u32) {
     )
 }
 
+fn exact_image_size(window: &Window, frame: &VideoFrame) -> Option<gpui::Size<gpui::Pixels>> {
+    let (width, height) = viewport_pixels(window);
+    // AppKit can round the window out to a whole point on a Retina display.
+    // In that case, keep the image at its original pixel size, anchored at the top left.
+    if !(frame.width..=frame.width + 1).contains(&width)
+        || !(frame.height..=frame.height + 1).contains(&height)
+    {
+        return None;
+    }
+    let scale = window.scale_factor();
+    Some(size(
+        px(frame.width as f32 / scale),
+        px(frame.height as f32 / scale),
+    ))
+}
+
 impl RemoteView {
     fn remote_resize_target(&self, window: &Window) -> Option<(u32, u32)> {
         let frame = self.frame.as_ref()?;
@@ -1818,6 +1834,12 @@ impl RemoteView {
         window: &Window,
     ) -> Option<(u16, u16)> {
         let frame = self.frame.as_ref()?;
+        if let Some(image) = exact_image_size(window, frame) {
+            let x = position.x.to_f64() / image.width.to_f64();
+            let y = position.y.to_f64() / image.height.to_f64();
+            return ((0. ..1.).contains(&x) && (0. ..1.).contains(&y))
+                .then(|| ((x * 65535.).round() as u16, (y * 65535.).round() as u16));
+        }
         let viewport = window.viewport_size();
         let (width, height) = (f64::from(frame.width), f64::from(frame.height));
         let scale = (viewport.width.to_f64() / width).min(viewport.height.to_f64() / height);
@@ -1989,7 +2011,18 @@ impl Render for RemoteView {
             .bg(rgb(0x101722))
             .text_color(rgb(0xe8edf5))
             .when_some(self.frame.clone(), |view, frame| {
-                view.child(img(frame.image).size_full().object_fit(ObjectFit::Contain))
+                let exact_size = exact_image_size(window, &frame);
+                let image = img(frame.image).object_fit(ObjectFit::Contain);
+                view.child(if let Some(exact) = exact_size {
+                    image
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w(exact.width)
+                        .h(exact.height)
+                } else {
+                    image.size_full()
+                })
             })
             .when_some(dimensions, |view, dimensions| {
                 view.child(
