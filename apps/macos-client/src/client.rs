@@ -8,8 +8,8 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
 };
 use protocol::{
-    ConnectionProfile, Endpoint, Frame, Hello, LaunchApp, Pairing, Request, Response, Result,
-    VERSION, WindowInfo, Wire,
+    ConnectionProfile, Endpoint, Frame, Hello, HostUnreachable, LaunchApp, Pairing, Request,
+    Response, Result, VERSION, WindowInfo, Wire,
 };
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use std::{
@@ -28,21 +28,6 @@ struct Host {
     pairing: Pairing,
     config: Arc<ClientConfig>,
 }
-
-#[derive(Debug)]
-struct HostUnreachable(protocol::Error);
-
-impl std::fmt::Display for HostUnreachable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Não foi possível acessar o endereço do Windows · {}",
-            self.0
-        )
-    }
-}
-
-impl std::error::Error for HostUnreachable {}
 
 impl Host {
     fn from_profile(profile: ConnectionProfile) -> Result<Self> {
@@ -127,7 +112,7 @@ impl Host {
 enum EnrollmentUpdate {
     Code(String),
     Approved(ConnectionProfile),
-    Failed(String),
+    Failed(protocol::Error),
 }
 
 fn enroll(address: Endpoint, updates: &async_channel::Sender<EnrollmentUpdate>) -> Result<()> {
@@ -451,7 +436,7 @@ impl Launcher {
         self.status = format!("Solicitando pareamento a {addr}…");
         thread::spawn(move || {
             if let Err(error) = enroll(addr, &sender) {
-                let _ = sender.send_blocking(EnrollmentUpdate::Failed(error.to_string()));
+                let _ = sender.send_blocking(EnrollmentUpdate::Failed(error));
             }
         });
         let task = cx.spawn(async move |view, cx| {
@@ -489,7 +474,11 @@ impl Launcher {
                 self.finish_enrollment(cx);
             }
             EnrollmentUpdate::Failed(error) => {
-                self.status = format!("Falha no pareamento · {error}");
+                self.status = if error.is::<HostUnreachable>() {
+                    error.to_string()
+                } else {
+                    format!("Falha no pareamento · {error}")
+                };
                 self.enrollment = None;
             }
         }

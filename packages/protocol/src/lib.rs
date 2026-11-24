@@ -3,7 +3,7 @@ mod pairing;
 pub mod rtc;
 
 pub use endpoint::{Endpoint, Wire, use_incoming};
-pub use pairing::{PairingGate, PairingState, accept_pairing, request_pairing};
+pub use pairing::{HostUnreachable, PairingGate, PairingState, accept_pairing, request_pairing};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};

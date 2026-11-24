@@ -159,11 +159,32 @@ impl PairingGate {
     }
 }
 
+#[derive(Debug)]
+pub struct HostUnreachable(pub crate::Error);
+
+impl std::fmt::Display for HostUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Não foi possível acessar o endereço do Windows · {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HostUnreachable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 pub fn request_pairing(
     endpoint: Endpoint,
     on_code: impl FnOnce(String) -> Result<()>,
 ) -> Result<ConnectionProfile> {
-    let wire = endpoint.connect(Duration::from_secs(65))?;
+    let wire = endpoint
+        .connect(Duration::from_secs(65))
+        .map_err(HostUnreachable)?;
     let conn = ClientConnection::new(Arc::new(pairing_client_config()?), SERVER_NAME.try_into()?)?;
     let mut stream = StreamOwned::new(conn, wire);
     crate::send(
