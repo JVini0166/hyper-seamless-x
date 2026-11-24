@@ -102,6 +102,7 @@ pub enum Request {
     Pair,
     List,
     ListCatalog,
+    ListCatalogV2,
     View {
         handle: u64,
         process_id: u32,
@@ -196,6 +197,7 @@ pub enum LaunchApp {
     Explorer,
     Notepad,
     VsCode,
+    VisualStudio,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]

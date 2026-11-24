@@ -151,7 +151,7 @@ fn handle(
     hello.verify(pairing)?;
     match hello.request {
         Request::Pair => unreachable!("pairing handled above"),
-        Request::List | Request::ListCatalog => {
+        Request::List | Request::ListCatalog | Request::ListCatalogV2 => {
             let mut windows: Vec<_> = Window::enumerate()?
                 .into_iter()
                 .filter_map(|window| {
@@ -175,11 +175,20 @@ fn handle(
                 .take(128)
                 .collect();
             windows.sort_by_cached_key(|window| window.title.to_lowercase());
-            let response = if matches!(hello.request, Request::ListCatalog) {
-                let apps = [LaunchApp::Explorer, LaunchApp::Notepad, LaunchApp::VsCode]
-                    .into_iter()
-                    .filter(|app| launch_path(*app).is_ok_and(|path| path.is_file()))
-                    .collect();
+            let response = if !matches!(hello.request, Request::List) {
+                let apps = [
+                    LaunchApp::Explorer,
+                    LaunchApp::Notepad,
+                    LaunchApp::VsCode,
+                    LaunchApp::VisualStudio,
+                ]
+                .into_iter()
+                .filter(|app| {
+                    *app != LaunchApp::VisualStudio
+                        || matches!(hello.request, Request::ListCatalogV2)
+                })
+                .filter(|app| launch_path(*app).is_ok_and(|path| path.is_file()))
+                .collect();
                 Response::WindowCatalog { windows, apps }
             } else {
                 Response::Windows(windows)
@@ -240,6 +249,34 @@ fn handle(
 }
 
 fn launch_path(app: LaunchApp) -> Result<PathBuf> {
+    if app == LaunchApp::VisualStudio {
+        return [
+            ("ProgramFiles", "18"),
+            ("ProgramFiles", "2022"),
+            ("ProgramFiles(x86)", "2019"),
+            ("ProgramFiles(x86)", "2017"),
+        ]
+        .into_iter()
+        .filter_map(|(base, version)| {
+            std::env::var_os(base).map(|base| {
+                PathBuf::from(base)
+                    .join("Microsoft Visual Studio")
+                    .join(version)
+            })
+        })
+        .flat_map(|root| {
+            [
+                "Enterprise",
+                "Professional",
+                "Community",
+                "Insiders",
+                "Preview",
+            ]
+            .map(|edition| root.join(edition).join("Common7/IDE/devenv.exe"))
+        })
+        .find(|path| path.is_absolute() && path.is_file())
+        .ok_or_else(|| "Visual Studio não encontrado nas pastas padrão do Windows".into());
+    }
     if matches!(app, LaunchApp::VsCode) {
         return [
             ("LOCALAPPDATA", "Programs/Microsoft VS Code/Code.exe"),
@@ -257,7 +294,7 @@ fn launch_path(app: LaunchApp) -> Result<PathBuf> {
     let name = match app {
         LaunchApp::Explorer => "explorer.exe",
         LaunchApp::Notepad => "System32/notepad.exe",
-        LaunchApp::VsCode => unreachable!(),
+        LaunchApp::VsCode | LaunchApp::VisualStudio => unreachable!(),
     };
     Ok(PathBuf::from(root).join(name))
 }

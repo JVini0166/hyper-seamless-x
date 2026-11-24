@@ -81,7 +81,8 @@ impl Host {
 
     fn list(&self) -> Result<(Vec<WindowInfo>, Vec<LaunchApp>)> {
         let (response, _) = self
-            .request(Request::ListCatalog)
+            .request(Request::ListCatalogV2)
+            .or_else(|_| self.request(Request::ListCatalog))
             .or_else(|_| self.request(Request::List))?;
         match response {
             Response::WindowCatalog { windows, apps } => Ok((windows, apps)),
@@ -686,6 +687,7 @@ fn launched_window(
         LaunchApp::Explorer => "explorer.exe",
         LaunchApp::Notepad => "notepad.exe",
         LaunchApp::VsCode => "code.exe",
+        LaunchApp::VisualStudio => "devenv.exe",
     };
     let mut fresh = after.iter().filter(|window| {
         window.process.eq_ignore_ascii_case(process)
@@ -850,6 +852,11 @@ impl Render for Launcher {
                                 (LaunchApp::Explorer, "explorer", "Abrir Explorador"),
                                 (LaunchApp::Notepad, "notepad", "Abrir Bloco de Notas"),
                                 (LaunchApp::VsCode, "vscode", "Abrir VS Code"),
+                                (
+                                    LaunchApp::VisualStudio,
+                                    "visual-studio",
+                                    "Abrir Visual Studio",
+                                ),
                             ]
                             .into_iter()
                             .filter(|(app, _, _)| self.launchable_apps.contains(app))
@@ -2094,13 +2101,17 @@ mod tests {
         let host = previous.at_address(address)?;
         assert_ne!(host.addr, previous.addr);
         let server = thread::spawn(move || -> Result<()> {
-            for reply in [
-                Some(Response::WindowCatalog {
-                    windows: vec![],
-                    apps: vec![LaunchApp::VsCode],
-                }),
-                None,
-                Some(Response::Windows(vec![])),
+            for (expected, reply) in [
+                (
+                    "ListCatalogV2",
+                    Some(Response::WindowCatalog {
+                        windows: vec![],
+                        apps: vec![LaunchApp::VsCode, LaunchApp::VisualStudio],
+                    }),
+                ),
+                ("ListCatalogV2", None),
+                ("ListCatalog", None),
+                ("List", Some(Response::Windows(vec![]))),
             ] {
                 let (socket, _) = listener.accept()?;
                 let mut stream = StreamOwned::new(
@@ -2109,20 +2120,17 @@ mod tests {
                 );
                 let hello: Hello = protocol::receive(&mut stream)?;
                 hello.verify(&pairing)?;
+                assert_eq!(serde_json::to_value(hello.request)?, expected);
                 if let Some(reply) = reply {
-                    if matches!(reply, Response::Windows(_)) {
-                        assert!(matches!(hello.request, Request::List));
-                    } else {
-                        assert!(matches!(hello.request, Request::ListCatalog));
-                    }
                     protocol::send(&mut stream, &reply)?;
-                } else {
-                    assert!(matches!(hello.request, Request::ListCatalog));
                 }
             }
             Ok(())
         });
-        assert!(matches!(host.list()?.1.as_slice(), [LaunchApp::VsCode]));
+        assert!(matches!(
+            host.list()?.1.as_slice(),
+            [LaunchApp::VsCode, LaunchApp::VisualStudio]
+        ));
         assert!(matches!(
             host.list()?.1.as_slice(),
             [LaunchApp::Explorer, LaunchApp::Notepad]
