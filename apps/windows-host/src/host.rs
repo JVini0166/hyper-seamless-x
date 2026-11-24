@@ -152,16 +152,21 @@ fn handle(
     match hello.request {
         Request::Pair => unreachable!("pairing handled above"),
         Request::List | Request::ListCatalog | Request::ListCatalogV2 => {
+            let host_process_id = std::process::id();
             let mut windows: Vec<_> = Window::enumerate()?
                 .into_iter()
                 .filter_map(|window| {
+                    let process_id = window.process_id().ok()?;
+                    if process_id == host_process_id {
+                        return None;
+                    }
                     let title = window.title().ok()?;
                     if title.trim().is_empty() {
                         return None;
                     }
                     Some(WindowInfo {
                         handle: window.as_raw_hwnd() as u64,
-                        process_id: window.process_id().ok()?,
+                        process_id,
                         title: title.chars().take(256).collect(),
                         minimized: is_minimized(window),
                         process: window
@@ -361,6 +366,9 @@ fn serve_input(
 }
 
 fn find_window(handle: u64, process_id: u32) -> Result<Option<Window>> {
+    if process_id == std::process::id() {
+        return Ok(None);
+    }
     Ok(Window::enumerate()?.into_iter().find(|window| {
         window.as_raw_hwnd() as u64 == handle && window.process_id().ok() == Some(process_id)
     }))
