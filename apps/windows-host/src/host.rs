@@ -655,6 +655,7 @@ fn capture(
         let mut h264_enabled = h264;
         let mut last_encoder = None;
         let mut encoder: Option<crate::h264::Encoder> = None;
+        let mut last_bgra: Option<Frame> = None;
         if !h264 {
             protocol::send(stream, &Response::Streaming)?;
         }
@@ -790,9 +791,18 @@ fn capture(
                     protocol::send(stream, &Response::Streaming)?;
                     announced = true;
                 }
-                frame.send_with_metrics(stream, metrics.then_some((capture_micros, dropped)))?;
-                last_write = Instant::now();
-            } else if rtc.is_none() && announced && last_write.elapsed() >= Duration::from_secs(2) {
+                if last_bgra.as_ref().is_none_or(|previous| {
+                    (previous.width, previous.height) != (frame.width, frame.height)
+                        || previous.bgra != frame.bgra
+                }) {
+                    frame
+                        .send_with_metrics(stream, metrics.then_some((capture_micros, dropped)))?;
+                    last_bgra = Some(frame);
+                    last_write = Instant::now();
+                    continue;
+                }
+            }
+            if rtc.is_none() && announced && last_write.elapsed() >= Duration::from_secs(2) {
                 protocol::heartbeat(stream)?;
                 last_write = Instant::now();
             } else {
