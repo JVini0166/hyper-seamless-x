@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+mod tray;
+
 pub fn run() {
     Application::new().run(|cx| {
         cx.on_window_closed(|cx| {
@@ -32,7 +34,10 @@ pub fn run() {
             }),
             ..Default::default()
         };
-        let _ = cx.open_window(options, |_, cx| cx.new(|_| HostPanel::new()));
+        let _ = cx.open_window(options, |window, cx| {
+            let has_tray = tray::attach(window);
+            cx.new(|_| HostPanel::new(has_tray))
+        });
     });
 }
 
@@ -94,6 +99,7 @@ struct Sharing {
 }
 
 struct HostPanel {
+    has_tray: bool,
     addresses: Vec<(String, Ipv4Addr)>,
     sharing: Option<Sharing>,
     status: String,
@@ -102,8 +108,9 @@ struct HostPanel {
 }
 
 impl HostPanel {
-    fn new() -> Self {
+    fn new(has_tray: bool) -> Self {
         let mut panel = Self {
+            has_tray,
             addresses: Vec::new(),
             sharing: None,
             status: String::new(),
@@ -422,6 +429,11 @@ impl Render for HostPanel {
                                             view.status = "Túnel ngrok encerrado. O host local continua disponível.".into();
                                             cx.notify();
                                         }),
+                                    ))
+                                })
+                                .when(self.has_tray, |bar| {
+                                    bar.child(button("tray", "Minimizar para a bandeja").on_click(
+                                        |_, window, _| tray::minimize(window),
                                     ))
                                 })
                                 .child(button("stop", "Parar compartilhamento").on_click(

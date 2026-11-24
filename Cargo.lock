@@ -7870,6 +7870,7 @@ dependencies = [
  "mdns-sd",
  "mini-nvcodec",
  "protocol",
+ "raw-window-handle",
  "rustls",
  "serde_json",
  "ureq",
